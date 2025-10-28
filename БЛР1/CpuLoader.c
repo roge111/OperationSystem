@@ -2,11 +2,84 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <pthread.h>
+#include <unistd.h>
 #include <openssl/md5.h>
 
 #define ARRAY_SIZE 10000
 #define MAX_NUM_LENGTH 150
 #define MAX_TEXT_LENGTH 500000
+
+
+typedef struct {
+    double user;   // %user
+    double system; // %sys  
+    double wait;   // %wait
+} cpu_stats_t;
+
+
+typedef struct {
+    double user_avg;
+    double system_avg;
+    double wait_avg;
+} monitoring_result_t;
+
+// Получаем полную статистику CPU
+cpu_stats_t get_cpu_stats_from_top() {
+    cpu_stats_t stats = {-1.0, -1.0, -1.0};
+    
+    // Получаем полную строку статистики CPU
+    FILE* top = popen("top -bn1 | grep 'Cpu(s)'", "r");
+    if (!top) {
+        return stats;
+    }
+    
+    char buffer[256];
+    if (fgets(buffer, sizeof(buffer), top)) {
+        // Парсим строку типа: "%Cpu(s):  12.3 us,  5.6 sy,  0.0 ni, 82.1 id,  3.2 wa,  0.0 hi,  0.0 si,  0.0 st"
+        double us, sy, ni, id, wa, hi, si, st;
+        if (sscanf(buffer, "%%Cpu(s): %lf us, %lf sy, %lf ni, %lf id, %lf wa, %lf hi, %lf si, %lf st", 
+                  &us, &sy, &ni, &id, &wa, &hi, &si, &st) == 8) {
+            stats.user = us;
+            stats.system = sy;
+            stats.wait = wa;
+        }
+    }
+    
+    pclose(top);
+    return stats;
+}
+
+// Данная функция нужна для запуска в параллельном потоке мониторинга утилит cpu в время работы данного нагрузчика
+// Измерять до работы нагрузчика и после невозможно, ведь так нельзя будет узнать точное значение
+void* cpu_monitoring(void* arg){
+    cpu_stats_t* result = malloc(sizeof(cpu_stats_t)); // Вдыелим память
+    if (!result) return NULL;
+
+    double total_user = 0.0, total_wait = 0.0, total_sys = 0.0;
+    int valis_samples = 0; // Позволит проверить, что есть замеры, которые прошли валидно
+    
+    for (int i = 0; i < 10; i++){
+        cpu_stats_t monitor = get_cpu_stats_from_top();
+
+        if (monitor.user >= 0 && monitor.system >= 0 && monitor.wait >= 0) {
+            total_user += monitor.user;
+            total_wait += monitor.wait;
+            total_sys += monitor.system;
+            valis_samples++;
+        }
+    }
+
+    if (valis_samples > 0){
+        result->system = total_sys/valis_samples;
+        result->user = total_user/valis_samples;
+        result->wait = total_wait/valis_samples;
+    }
+
+    return result;
+
+}
+
 
 void inefficient_md5(const char* text, char* hash) {
     MD5_CTX context;
@@ -35,10 +108,6 @@ void inefficient_md5(const char* text, char* hash) {
 }
 
 
-
-#include <stdlib.h>
-#include <string.h>
-
 char* create_text() {
     int array_size = ARRAY_SIZE;
     char array[ARRAY_SIZE][MAX_NUM_LENGTH];
@@ -47,7 +116,7 @@ char* create_text() {
     FILE* ptr = fopen("fragments_text.txt", "r");
     if (ptr == NULL) {
         // printf("Ошибка: файл fragments_text.txt не найден!\n");
-        return NULL;  // ← Исправлено: NULL вместо 0
+        return NULL;  
     }
     
     while (count < array_size && fscanf(ptr, "%149s", array[count]) == 1) {
@@ -57,7 +126,7 @@ char* create_text() {
     
     if (count == 0) {
         // printf("Файл пуст!\n");
-        return NULL;  // ← Исправлено: NULL вместо 0
+        return NULL;  
     }
     
     int min = 0;
@@ -94,23 +163,38 @@ char* create_text() {
     return text;  // Теперь это валидный указатель на heap
 }
 
-clock_t cpu_loader(const char* text) {
-    //printf("Поток CPU начал работу\n");
-    
-    
-    
-    // printf("Поток создал строку из %d фрагментов (%zu символов)\n", 
-    //        text_count, strlen(text));
-    
+clock_t cpu_loader(const char* text, double* user_avg, double* system_avg, double* wait_avg) {
     char hash[33];
     clock_t start = clock();
     
+    // Создаем поток для мониторинга
+    pthread_t monitoring_thread;
+    monitoring_result_t* monitoring_result;
+
+    if (pthread_create(&monitoring_thread, NULL, cpu_monitoring, NULL) != 0) {
+        // Ошибка создания потока
+        *user_avg = *system_avg = *wait_avg = -1.0;
+        return 1;
+    }
+
     // Основная нагрузка
     inefficient_md5(text, hash);
+    
+    // Получаем результаты мониторинга
+    pthread_join(monitoring_thread, (void**)&monitoring_result);
     
     clock_t end = clock();
     clock_t time_total = end - start;
     
-    //printf("Поток завершил работу за %ld мс\n", time_total);
+    // Записываем результаты в переданные указатели
+    if (monitoring_result) {
+        *user_avg = monitoring_result->user_avg;
+        *system_avg = monitoring_result->system_avg;
+        *wait_avg = monitoring_result->wait_avg;
+        free(monitoring_result);
+    } else {
+        *user_avg = *system_avg = *wait_avg = -1.0;
+    }
+    
     return time_total;
 }

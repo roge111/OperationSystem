@@ -12,19 +12,29 @@ typedef struct {
     int number;  // Для memory_loader
     char* text;  // ← ДОБАВЛЕНО: для передачи текста в cpu_loader
     clock_t execution_time;
+
+    double user_avg;      // ← ДОБАВЛЕНО для статистики CPU
+    double system_avg;    // ← ДОБАВЛЕНО для статистики CPU
+    double wait_avg; 
 } thread_data_t;
 
-// Функция для потоков CPU
+// Обновленная функция для потоков CPU
 void* cpu_loader_thread(void* arg) {
     thread_data_t* data = (thread_data_t*)arg;
     // printf("Поток CPU %d начал работу\n", data->thread_id);
     
-    data->execution_time = cpu_loader(data->text);  // ← ПЕРЕДАЕМ text
+    // Вызываем cpu_loader с новой сигнатурой
+    double user_avg, system_avg, wait_avg;
+    data->execution_time = cpu_loader(data->text, &user_avg, &system_avg, &wait_avg);
+    
+    // Сохраняем статистику CPU
+    data->user_avg = user_avg;
+    data->system_avg = system_avg;
+    data->wait_avg = wait_avg;
     
     // printf("Поток CPU %d завершил работу за %ld мс\n", data->thread_id, data->execution_time);
     return NULL;
 }
-
 // Функция для потоков Memory
 void* memory_loader_thread(void* arg) {
     thread_data_t* data = (thread_data_t*)arg;
@@ -112,6 +122,7 @@ int main(int argc, char *argv[]) {
     }
     
     clock_t total_end = clock();
+    double total_user_avg = 0.0, total_system_avg = 0.0, total_wait_avg = 0.0;
     
     // Вывод результатов
     // printf("\n=== РЕЗУЛЬТАТЫ ===\n");
@@ -119,7 +130,11 @@ int main(int argc, char *argv[]) {
     clock_t total_cpu_time = 0;
     for (int i = 0; i < count_cpu_loader; i++) {
         // printf("Поток CPU %d: %ld мс\n", cpu_data[i].thread_id, cpu_data[i].execution_time);
+        
         total_cpu_time += cpu_data[i].execution_time;
+        total_user_avg += cpu_data[i].user_avg;
+        total_system_avg += cpu_data[i].system_avg;
+        total_wait_avg += cpu_data[i].wait_avg;
     }
     
     clock_t total_memory_time = 0;
@@ -130,7 +145,7 @@ int main(int argc, char *argv[]) {
     
     // printf("\nСуммарное время CPU: %ld мс\n", total_cpu_time);
     // printf("Суммарное время Memory: %ld мс\n", total_memory_time);
-    printf("%ld", (total_cpu_time + total_memory_time));
+    printf("%ld,%ld,%.1f,%.1f,%.1f", (total_cpu_time + total_memory_time), total_cpu_time, total_user_avg, total_system_avg, total_wait_avg);
     
     return 0;
 }
