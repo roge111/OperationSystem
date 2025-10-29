@@ -32,6 +32,7 @@ def run_c_loader_args(count_cpu, count_memory, memory_number=None):
 
 # Примеры использования
 if __name__ == "__main__":
+    
 
     file_name = input('Введите название файла для сохрания без формата файла>> ')
     
@@ -39,7 +40,7 @@ if __name__ == "__main__":
         file_open = open(f'{file_name}.csv', 'a')
     else:
         file_open = open(f'{file_name}.csv', 'w')
-        file_open.write('Количество нагрузки на CPU; Количетсво нагрузки на память; Время работы;\n')
+        file_open.write('Количество нагрузки на CPU; Количетсво нагрузки на память; Время работы; %USER; %SYS; %WAIT, Количество переключений контекста; Количество паралельных процессов\n')
 
     count_cpu_loaders = int(input('Введите количество нагрузчиков на cpu>> '))
     count_memory_loaders = int(input('Ввеодите количество нагрузчиков на память>> '))
@@ -47,15 +48,87 @@ if __name__ == "__main__":
         number_for_memory = int(input('Введите число для нагрузчика на память>> '))
 
     number_launches = int(input('Введите число запусков для анализа>> '))
-    sum_times = 0
-    for i in range(number_launches):
+    if count_cpu_loaders and not(count_memory_loaders):
+        
+        cnt = 0 # Число увеличений нагрузок на cpu
+        count_steps = int(input("Введите количество увелечений (шагов) нагрузок на CPU: "))
+        step  = int(input("Введите шаг увеличения нагрузок на CPU: "))
+        while cnt < count_steps:
+            sum_times = 0
+            sum_system = 0
+            sum_user = 0
+            sum_wait = 0
+            sum_context_switches = 0
+            sum_processes = 0
+            print('Шаг', cnt)
+            for i in range(number_launches):
 
-        if count_memory_loaders == 0:
-            code, result = run_c_loader_args(count_cpu_loaders, 0)
-        else:
+                
+                code, result = run_c_loader_args(count_cpu_loaders, 0)
+                
+                print(result, f'Запуск: {i + 1}')
+                result = list(map(float, result.split(',')))
+                sum_times += result[0]
+                sum_user += result[1]
+                sum_system += result[2]
+                sum_wait += result[3]
+                sum_context_switches += result[4]
+                sum_processes += result[5]
+            file_open.write(f'{count_cpu_loaders};{count_memory_loaders};{sum_times/number_launches};{sum_user/number_launches};{sum_system/number_launches};{sum_wait/number_launches};{sum_context_switches/number_launches};{sum_context_switches/number_launches}\n')
+            count_cpu_loaders += step
+            cnt +=1
+    elif count_memory_loaders and not(count_cpu_loaders):
+        sum_times = 0
+        cnt = 0 # Число увеличений нагрузок на cpu
+        count_steps = int(input("Введите количество увелечений (шагов) нагрузок на память: "))
+        step  = int(input("Введите шаг увеличения нагрузок на память: "))
+        while cnt < count_steps:
+            sum_times = 0
+            sum_system = 0
+            sum_user = 0
+            sum_wait = 0
+            sum_context_switches = 0
+            sum_processes = 0
+            print('Шаг', cnt)
+            for i in range(number_launches):
+
+                
+                code, result = run_c_loader_args(count_cpu_loaders, count_memory_loaders, number_for_memory)
+                
+                print(result, f'Запуск: {i + 1}')
+                result = list(map(float, result.split(',')))
+                sum_times += result[0]
+                sum_user += result[1]
+                sum_system += result[2]
+                sum_wait += result[3]
+                sum_context_switches += result[4]
+                sum_processes += result[5]
+            file_open.write(f'{count_cpu_loaders};{count_memory_loaders};{sum_times/number_launches};{sum_user/number_launches};{sum_system/number_launches};{sum_wait/number_launches};{sum_context_switches/number_launches};{sum_processes/number_launches}\n')
+            count_memory_loaders += step
+            cnt +=1
+    else:
+
+
+
+       
+        sum_times = 0
+        sum_system = 0
+        sum_user = 0
+        sum_wait = 0
+        sum_context_switches = 0
+        sum_processes = 0
+        for i in range(number_launches):
+
+            
             code, result = run_c_loader_args(count_cpu_loaders, count_memory_loaders, number_for_memory)
-        print(f'Общее время выполнения: {result}. Запуск номер {i+1}')
-        result = int(result.strip())
-        sum_times += result
-    print(f'Среднее значение времени: {sum_times/number_launches}')
-    file_open.write(f'{count_cpu_loaders};{count_memory_loaders};{sum_times/number_launches}\n')
+            print(result, f'Запуск: {i + 1}')
+            result = list(map(float, result.split(',')))
+            sum_times += result[0]
+            sum_user += result[1]
+            sum_system += result[2]
+            sum_wait += result[3]
+            sum_context_switches += result[4]
+            sum_processes += result[5]
+
+        print(f'Среднее значение времени: {sum_times/number_launches}')
+        file_open.write(f'{count_cpu_loaders};{count_memory_loaders};{sum_times/number_launches};{sum_user/number_launches};{sum_system/number_launches};{sum_wait/number_launches};{sum_context_switches/number_launches};{sum_processes/number_launches}\n')
