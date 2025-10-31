@@ -34,32 +34,21 @@ typedef struct {
 
 
 
-void* simple_process_monitor(void* arg) {
-    process_monitor_t* monitor = (process_monitor_t*)arg;
-    
-    int check_count = 0;
-    while (monitor->monitoring && check_count < 2) {
-        FILE *fp = popen("ps aux | grep -c \"[.]/loaders\"", "r");
-        if (fp) {
-            int count = 0;
-            if (fscanf(fp, "%d", &count) == 1) {
-                if (count > 1) {
-                    int parallel_count = count - 2;
-                    if (parallel_count > 0 && parallel_count > monitor->max_processes) {
-                        monitor->max_processes = parallel_count;
-                    }
-                }
-            }
-            pclose(fp);
-        }
-        check_count++;
-        sleep(1);
-    }
-    
-    return NULL;
-}
 
-void memory_work(int number, char array[ARRAY_SIZE][MAX_NUM_LENGTH], int count) {
+/**
+ * @brief Выполняет поиск и замену числа в массиве строк, затем записывает результат в файл
+ *
+ * Функция преобразует входное число в строку и ищет его в массиве строк.
+ * При нахождении заменяет элемент массива на строковое представление числа.
+ * Результат записывается в файл output.txt.
+ *
+ * @param number Целое число для поиска и замены
+ * @param array Двумерный массив строк, в котором производится поиск
+ * @param count Количество элементов в массиве для обработки
+ * 
+ * Вовзращает время замены числа + время записи в файл
+ */
+clock_t memory_work(int number, char array[ARRAY_SIZE][MAX_NUM_LENGTH], int count) {
     char number_str[MAX_NUM_LENGTH];
     sprintf(number_str, "%d", number);
     
@@ -67,26 +56,54 @@ void memory_work(int number, char array[ARRAY_SIZE][MAX_NUM_LENGTH], int count) 
     if (count > ARRAY_SIZE) {
         count = ARRAY_SIZE;
     }
-    
+    clock_t start_replace = 0;
+    clock_t end_replace = 0;
     // Ищем и заменяем число
     for (int i = 0; i < count; i++) {
         if (atoi(array[i]) == number) {
+            start_replace = clock();
             strcpy(array[i], number_str);
+            end_replace = clock();
+        
             break;
         }
     }
+
+    clock_t time_replace = end_replace - start_replace;
     
     // Записываем в файл
+    clock_t start_write = clock();
     FILE* ptr = fopen("output.txt", "w");
+    
     if (ptr != NULL) {
         for (int i = 0; i < count; i++) {
             fprintf(ptr, "%s\n", array[i]);
         }
         fclose(ptr);
     }
+    clock_t end_write = clock();
+    clock_t time_write = end_write - start_write;
+    
+    return time_replace + time_write;
 }
 
-clock_t memory_loader(int number, double* user_avg, double* system_avg, double* wait_avg, 
+/**
+ * @brief Загружает данные из файла с отключенным кэшированием и мониторит использование CPU
+ *
+ * Функция читает данные из файла fragments_numbers.txt, отключая кэширование,
+ * выполняет обработку данных и записывает результат в файл output.txt.
+ * Во время выполнения операций мониторится использование CPU и количество процессов.
+ *
+ * @param number Целое число для поиска и замены в данных
+ * @param user_avg Указатель для возврата среднего значения времени в пользовательском режиме CPU
+ * @param system_avg Указатель для возврата среднего значения времени в системном режиме CPU
+ * @param wait_avg Указатель для возврата среднего значения времени ожидания CPU
+ * @param context_switches_total Указатель для возврата общего количества переключений контекста
+ * @param context_switches_delta Указатель для возврата изменения количества переключений контекста
+ * @param parallel_processes Указатель для возврата максимального количества параллельных процессов
+ * @return clock_t Общее время выполнения операций чтения и записи
+ */
+clock_t memory_loader(int number, double* user_avg, double* system_avg, double* wait_avg,
                      unsigned long* context_switches_total, unsigned long* context_switches_delta, int* parallel_processes)
 {
     // Инициализация выходных параметров
@@ -101,13 +118,11 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
     int count = 0;
     
      // ЧТЕНИЕ ФАЙЛА С ОТКЛЮЧЕННЫМ КЭШИРОВАНИЕМ
-    system("curl -s http://google.com > /dev/null 2>&1");
-    system("wget -q -O /dev/null http://yandex.ru 2>&1");
     #ifndef O_DIRECT
     #define O_DIRECT 00040000 /* direct disk access hint */
     #endif
     
-    // Вариант 1: Использование низкоуровневого ввода-вывода с O_DIRECT
+    // Использование низкоуровневого ввода-вывода с O_DIRECT
     int fd = open("fragments_numbers.txt", O_RDONLY | O_DIRECT);
     if (fd == -1) {
         // Если O_DIRECT не сработал, пробуем обычное открытие
@@ -137,14 +152,14 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
         .monitoring = 1,
         .max_processes = 0
     };
-    pthread_t process_monitor_thread;
+    pthread_t process_monitor_thread_id;
     
     clock_t start_read = clock();
     
     // Запускаем мониторинг CPU для чтения
     if (pthread_create(&monitoring_thread_read, NULL, cpu_monitoring, NULL) == 0) {
         // Запускаем простой мониторинг процессов
-        pthread_create(&process_monitor_thread, NULL, simple_process_monitor, &process_monitor);
+        pthread_create(&process_monitor_thread_id, NULL, process_monitor_thread, &process_monitor);
         
         // Читаем файл с защитой от переполнения
         while (count < ARRAY_SIZE && fscanf(ptr, "%149s", array[count]) == 1) { 
@@ -153,7 +168,7 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
         
         // Останавливаем мониторинг процессов
         process_monitor.monitoring = 0;
-        pthread_join(process_monitor_thread, NULL);
+        pthread_join(process_monitor_thread_id, NULL);
         *parallel_processes = process_monitor.max_processes;
         
         // Получаем результаты мониторинга CPU
@@ -169,7 +184,7 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
     fclose(ptr);
     
     // ОБРАБОТКА ДАННЫХ И ЗАПИСЬ
-    clock_t start_write = clock();
+    
     
     // Мониторинг во время записи
     pthread_t monitoring_thread_write;
@@ -178,26 +193,27 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
     // Сбрасываем мониторинг процессов для записи
     process_monitor.monitoring = 1;
     process_monitor.max_processes = 0;
+    clock_t time_work = 0;
     
     if (pthread_create(&monitoring_thread_write, NULL, cpu_monitoring, NULL) == 0) {
-        pthread_create(&process_monitor_thread, NULL, simple_process_monitor, &process_monitor);
+        pthread_create(&process_monitor_thread_id, NULL, process_monitor_thread, &process_monitor);
         
         // Выполняем основную работу
-        memory_work(number, array, count);
+        time_work = memory_work(number, array, count);
         
         // Останавливаем мониторинг процессов
         process_monitor.monitoring = 0;
-        pthread_join(process_monitor_thread, NULL);
+        pthread_join(process_monitor_thread_id, NULL);
         *parallel_processes = (*parallel_processes + process_monitor.max_processes) / 2;
         
         // Получаем результаты мониторинга CPU для записи
         pthread_join(monitoring_thread_write, (void**)&result_write);
     } else {
         // Если не удалось запустить мониторинг, просто выполняем работу
-        memory_work(number, array, count);
+        time_work = memory_work(number, array, count);
     }
     
-    clock_t end_write = clock();
+    
     
     // ОБРАБОТКА РЕЗУЛЬТАТОВ МОНИТОРИНГА
     int valid_samples = 0;
@@ -234,6 +250,6 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
     
     // Возвращаем общее время
     clock_t time_read = end_read - start_read;
-    clock_t time_write = end_write - start_write;
-    return time_read + time_write;
+    
+    return time_read + time_work;
 }
