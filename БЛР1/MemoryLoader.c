@@ -4,7 +4,10 @@
 #include <time.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <fcntl.h>
+
 #include "CpuLoader.h"
+
 
 #define ARRAY_SIZE 10000
 #define MAX_NUM_LENGTH 150
@@ -97,12 +100,34 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
     char array[ARRAY_SIZE][MAX_NUM_LENGTH];
     int count = 0;
     
-    // ЧТЕНИЕ ФАЙЛА
-    FILE* ptr = fopen("fragments_numbers.txt", "r");
+     // ЧТЕНИЕ ФАЙЛА С ОТКЛЮЧЕННЫМ КЭШИРОВАНИЕМ
+    system("curl -s http://google.com > /dev/null 2>&1");
+    system("wget -q -O /dev/null http://yandex.ru 2>&1");
+    #ifndef O_DIRECT
+    #define O_DIRECT 00040000 /* direct disk access hint */
+    #endif
+    
+    // Вариант 1: Использование низкоуровневого ввода-вывода с O_DIRECT
+    int fd = open("fragments_numbers.txt", O_RDONLY | O_DIRECT);
+    if (fd == -1) {
+        // Если O_DIRECT не сработал, пробуем обычное открытие
+        fd = open("fragments_numbers.txt", O_RDONLY);
+        if (fd == -1) {
+            *user_avg = *system_avg = *wait_avg = -1.0;
+            return 1;
+        }
+    }
+    
+    FILE* ptr = fdopen(fd, "r");
     if (ptr == NULL) {
+        close(fd);
         *user_avg = *system_avg = *wait_avg = -1.0;
         return 1;
     }
+
+    // Отключаем буферизацию stdio и кэширование ядра
+    setbuf(ptr, NULL);
+    posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED | POSIX_FADV_SEQUENTIAL);
 
     // Мониторинг во время чтения
     pthread_t monitoring_thread_read;

@@ -41,7 +41,7 @@ if __name__ == "__main__":
     else:
         file_open = open(f'{file_name}.csv', 'w')
         file_open.write('Количество нагрузки на CPU; Количетсво нагрузки на память; Время работы; %USER; %SYS; %WAIT, Количество переключений контекста; Количество паралельных процессов\n')
-
+    print('ЕСЛИ ЗАХОТИТЕ ПРОВЕСТИ АНАЛИЗ НА ОДНОВРЕМЕННУЮ РАБОТУ РАЗНОГО ЧИСЛА НАГРУЗЧИКОВ, ТО ВВЕИДЕТ ПО 1')
     count_cpu_loaders = int(input('Введите количество нагрузчиков на cpu>> '))
     count_memory_loaders = int(input('Ввеодите количество нагрузчиков на память>> '))
     if count_memory_loaders > 0:
@@ -74,7 +74,7 @@ if __name__ == "__main__":
                 sum_wait += result[3]
                 sum_context_switches += result[4]
                 sum_processes += result[5]
-            file_open.write(f'{count_cpu_loaders};{count_memory_loaders};{sum_times/number_launches};{sum_user/number_launches};{sum_system/number_launches};{sum_wait/number_launches};{sum_context_switches/number_launches};{sum_context_switches/number_launches}\n')
+            file_open.write(f'{count_cpu_loaders};{count_memory_loaders};{sum_times/number_launches};{sum_user/number_launches};{sum_system/number_launches};{sum_wait/number_launches};{sum_context_switches/number_launches};{sum_processes/number_launches}\n')
             count_cpu_loaders += step
             cnt +=1
     elif count_memory_loaders and not(count_cpu_loaders):
@@ -108,27 +108,31 @@ if __name__ == "__main__":
             cnt +=1
     else:
 
+        steps = [(1, 1), (5, 1), (1, 5), (5, 5), (10, 1), (10, 5), (10, 10), (5, 10), (20, 1), (20, 10), (20, 15), (1, 20), (10, 20)]
+        cnt = 0
+        for count_cpu_loaders, count_memory_loaders in steps:
+            cnt += 1
+            print(f'Количество нагрузчиков на CPU: {count_cpu_loaders}')
+            print(f'Количество нагрузчиков на память: {count_memory_loaders}')
+            print(f'Запуск {cnt} из {len(steps)}')
+            sum_times = 0
+            sum_system = 0
+            sum_user = 0
+            sum_wait = 0
+            sum_context_switches = 0
+            sum_processes = 0
+            for i in range(number_launches):
 
+                
+                code, result = run_c_loader_args(count_cpu_loaders, count_memory_loaders, number_for_memory)
+                print(result, f'Запуск: {i + 1}')
+                result = list(map(float, result.split(',')))
+                sum_times += result[0]
+                sum_user += result[1]
+                sum_system += result[2]
+                sum_wait += result[3]
+                sum_context_switches += result[4]
+                sum_processes += result[5]
 
-       
-        sum_times = 0
-        sum_system = 0
-        sum_user = 0
-        sum_wait = 0
-        sum_context_switches = 0
-        sum_processes = 0
-        for i in range(number_launches):
-
-            
-            code, result = run_c_loader_args(count_cpu_loaders, count_memory_loaders, number_for_memory)
-            print(result, f'Запуск: {i + 1}')
-            result = list(map(float, result.split(',')))
-            sum_times += result[0]
-            sum_user += result[1]
-            sum_system += result[2]
-            sum_wait += result[3]
-            sum_context_switches += result[4]
-            sum_processes += result[5]
-
-        print(f'Среднее значение времени: {sum_times/number_launches}')
-        file_open.write(f'{count_cpu_loaders};{count_memory_loaders};{sum_times/number_launches};{sum_user/number_launches};{sum_system/number_launches};{sum_wait/number_launches};{sum_context_switches/number_launches};{sum_processes/number_launches}\n')
+            print(f'Среднее значение времени: {sum_times/number_launches}')
+            file_open.write(f'{count_cpu_loaders};{count_memory_loaders};{sum_times/number_launches};{sum_user/number_launches};{sum_system/number_launches};{sum_wait/number_launches};{sum_context_switches/number_launches};{sum_processes/number_launches}\n')

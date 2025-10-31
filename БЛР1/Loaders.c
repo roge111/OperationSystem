@@ -181,7 +181,7 @@ int main(int argc, char *argv[]) {
     }
     
     // Вывод результатов
-    printf("%ld,%.1f,%.1f,%.1f,%lu, %d\n", 
+    printf("%ld,%.1f,%.1f,%.6f,%lu, %d\n", 
            (total_cpu_time + total_memory_time),
            total_user_avg, 
            total_system_avg, 
