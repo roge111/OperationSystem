@@ -13,56 +13,101 @@
 #define MAX_NUM_LENGTH 150
 #define MAX_TEXT_LENGTH 500000
 
+/**
+ * @brief Структура для хранения статистики CPU
+ *
+ * Содержит информацию о загрузке процессора и количестве переключений контекста
+ */
 typedef struct
 {
-    double user;
-    double system;
-    double wait;
-    unsigned long context_switches;
+    double user;              ///< Время выполнения пользовательских процессов в процентах
+    double system;            ///< Время выполнения системных процессов в процентах
+    double wait;              ///< Время ожидания ввода-вывода в процентах
+    unsigned long context_switches; ///< Общее количество переключений контекста
 } cpu_stats_t;
 
+/**
+ * @brief Структура для хранения результатов мониторинга CPU
+ *
+ * Содержит усредненные значения загрузки процессора и изменение переключений контекста
+ */
 typedef struct
 {
-    double user_avg;
-    double system_avg;
-    double wait_avg;
-    unsigned long context_switches_total;
-    unsigned long context_switches_delta;
+    double user_avg;              ///< Среднее значение загрузки пользовательских процессов в процентах
+    double system_avg;            ///< Среднее значение загрузки системных процессов в процентах
+    double wait_avg;              ///< Среднее значение времени ожидания ввода-вывода в процентах
+    //unsigned long context_switches_total;
+    unsigned long context_switches_delta; ///< Изменение количества переключений контекста за период мониторинга
 } monitoring_result_t;
 
+/**
+ * @brief Структура для мониторинга процессов
+ *
+ * Содержит флаг активности мониторинга и максимальное количество процессов
+ */
 typedef struct {
-    volatile int monitoring;
-    int max_processes;
+    volatile int monitoring;  ///< Флаг активности мониторинга (1 - активен, 0 - остановлен)
+    int max_processes;        ///< Максимальное количество параллельных процессов, зафиксированное во время мониторинга
 } process_monitor_t;
 
-// Упрощенная функция мониторинга процессов
+/**
+ * @brief Упрощенная функция мониторинга процессов, выполняющаяся в отдельном потоке
+ *
+ * Функция отслеживает количество параллельных процессов loaders и обновляет
+ * максимальное значение в структуре process_monitor_t
+ *
+ * @param arg Указатель на структуру process_monitor_t с параметрами мониторинга
+ * @return void* NULL в любом случае
+ */
 void* process_monitor_thread(void* arg) {
     process_monitor_t* monitor = (process_monitor_t*)arg;
-    
-    int check_count = 0;
-    while (monitor->monitoring && check_count < 3) { // Уменьшили до 3 проверок
-        // Используем простой системный вызов
-        FILE *fp = popen("ps aux | grep -c \"[.]/loaders\"", "r");
-        if (fp) {
-            int count = 0;
-            if (fscanf(fp, "%d", &count) == 1) {
-                if (count > 1) {
-                    int parallel_count = count - 2; // grep и сам процесс
-                    if (parallel_count > 0 && parallel_count > monitor->max_processes) {
-                        monitor->max_processes = parallel_count;
-                    }
-                }
-            }
-            pclose(fp);
-        }
-        check_count++;
-        sleep(1);
+    FILE *fp;
+    char buffer[128];
+    int loader_pid;
+    int total_count = 0;
+    int exclude_count = 0;
+
+    // 1. Считаем ВСЕ процессы (упрощённо: процессы пользователя)
+    fp = popen("ps -e -o pid= | wc -l", "r");
+    if (!fp) {
+        monitor->max_processes = 0;  // Фиксируем результат в структуре
+        return NULL;  // Всегда возвращаем NULL
     }
-    
-    return NULL;
+    if (fscanf(fp, "%d", &total_count) != 1) {
+        pclose(fp);
+        monitor->max_processes = 0;
+        return NULL;
+    }
+    pclose(fp);
+
+    // 2. Находим PID процессов './loaders'
+    fp = popen("pgrep -f '^\\.\\/loaders$'", "r");
+    if (!fp) {
+        monitor->max_processes = total_count;  // Если pgrep недоступен — считаем всё
+        return NULL;
+    }
+
+    while (fgets(buffer, sizeof(buffer), fp)) {
+        if (sscanf(buffer, "%d", &loader_pid) == 1) {
+            exclude_count++;
+        }
+    }
+    pclose(fp);
+
+    // Записываем результат в структуру
+    monitor->max_processes = total_count - exclude_count;
+    return NULL;  // Всегда возвращаемся с NULL
 }
 
-// Функция мониторинга CPU
+
+/**
+ * @brief Функция мониторинга CPU, получает статистику из /proc/stat
+ *
+ * Читает информацию о загрузке процессора из файла /proc/stat и вычисляет
+ * процентные значения загрузки для различных типов процессов
+ *
+ * @return cpu_stats_t Структура с данными о загрузке CPU, в случае ошибки возвращает значения -1.0
+ */
 cpu_stats_t get_cpu_stats_from_proc() {
     cpu_stats_t stats = {-1.0, -1.0, -1.0, 0};
     
@@ -101,6 +146,15 @@ cpu_stats_t get_cpu_stats_from_proc() {
     return stats;
 }
 
+/**
+ * @brief Функция мониторинга CPU, выполняющаяся в отдельном потоке
+ *
+ * Выполняет серию измерений загрузки CPU с интервалом и вычисляет средние значения.
+ * Результаты возвращаются через выделенную структуру monitoring_result_t
+ *
+ * @param arg Не используется (зарезервировано для будущего использования)
+ * @return void* Указатель на структуру monitoring_result_t с результатами мониторинга
+ */
 void* cpu_monitoring(void* arg) {
     monitoring_result_t* result = malloc(sizeof(monitoring_result_t));
     if (!result) return NULL;
@@ -131,17 +185,25 @@ void* cpu_monitoring(void* arg) {
         result->system_avg = total_sys / valid_samples;
         result->user_avg = total_user / valid_samples;
         result->wait_avg = total_wait / valid_samples;
-        result->context_switches_total = last_context_switches;
+        //result->context_switches_total = last_context_switches;
         result->context_switches_delta = last_context_switches - first_context_switches;
     } else {
         result->system_avg = result->user_avg = result->wait_avg = -1.0;
-        result->context_switches_total = result->context_switches_delta = 0;
+        //result->context_switches_total = result->context_switches_delta = 0;
     }
 
     return result;
 }
 
-// Упрощенная функция MD5 с проверкой границ
+/**
+ * @brief Упрощенная функция MD5 с проверкой границ
+ *
+ * Выполняет многократное вычисление MD5 хеша для заданного текста.
+ * Используется для создания нагрузки на процессор.
+ *
+ * @param text Входной текст для хеширования
+ * @param hash Выходной буфер для хеша (минимум 33 байта)
+ */
 void inefficient_md5(const char* text, char* hash) {
     MD5_CTX context;
     unsigned char digest[MD5_DIGEST_LENGTH];
@@ -168,6 +230,15 @@ void inefficient_md5(const char* text, char* hash) {
     *output = '\0';
 }
 
+/**
+ * @brief Создает текст из фрагментов, прочитанных из файла
+ *
+ * Читает фрагменты текста из файла "fragments_text.txt" и составляет из них
+ * большую строку, выбирая фрагменты в случайном порядке
+ *
+ * @return char* Указатель на динамически выделенную строку с текстом,
+ *         NULL в случае ошибки или если файл пуст
+ */
 char* create_text() {
     int array_size = ARRAY_SIZE;
     char array[ARRAY_SIZE][MAX_NUM_LENGTH];
@@ -220,13 +291,27 @@ char* create_text() {
             }
         }
     }
-    return text;  // Теперь это валидный указатель на heap
+    return text;  
 }
 
-// Основная функция CPU loader с упрощенной логикой
-clock_t cpu_loader(const char* text, double* user_avg, double* system_avg, double* wait_avg, 
+/**
+ * @brief Основная функция CPU loader с упрощенной логикой
+ *
+ * Выполняет нагрузочное тестирование CPU путем вычисления MD5 хеша текста,
+ * параллельно отслеживая загрузку процессора и количество процессов
+ *
+ * @param text Входной текст для хеширования
+ * @param user_avg Указатель для возврата средней загрузки пользовательских процессов
+ * @param system_avg Указатель для возврата средней загрузки системных процессов
+ * @param wait_avg Указатель для возврата среднего времени ожидания ввода-вывода
+ * @param context_switches_total Указатель для возврата общего количества переключений контекста
+ * @param context_switches_delta Указатель для возврата изменения переключений контекста
+ * @param max_parallel_processes Указатель для возврата максимального количества параллельных процессов
+ * @return clock_t Время выполнения операции в тактах процессора
+ */
+clock_t cpu_loader(const char* text, double* user_avg, double* system_avg, double* wait_avg,
                    unsigned long* context_switches_total, unsigned long* context_switches_delta,
-                   int* max_parallel_processes) 
+                   int* max_parallel_processes)
 {  
     // Инициализация выходных параметров
     *user_avg = 0.0;
@@ -288,7 +373,7 @@ clock_t cpu_loader(const char* text, double* user_avg, double* system_avg, doubl
         *user_avg = monitoring_result->user_avg;
         *system_avg = monitoring_result->system_avg;
         *wait_avg = monitoring_result->wait_avg;
-        *context_switches_total = monitoring_result->context_switches_total;
+        //*context_switches_total = monitoring_result->context_switches_total;
         *context_switches_delta = monitoring_result->context_switches_delta;
         free(monitoring_result);
     } else {
@@ -299,7 +384,13 @@ clock_t cpu_loader(const char* text, double* user_avg, double* system_avg, doubl
     return time_total;
 }
 
-// Упрощенная тестовая функция
+/**
+ * @brief Упрощенная тестовая функция для проверки работы CPU loader
+ *
+ * Создает тестовый текст, запускает CPU loader и выводит результаты тестирования
+ *
+ * @return int 0 в случае успешного выполнения, 1 в случае ошибки
+ */
 int main_cpu() {
     printf("=== ТЕСТ CPU НАГРУЗЧИКА ===\n");
     
