@@ -12,12 +12,7 @@
 #define ARRAY_SIZE 10000
 #define MAX_NUM_LENGTH 150
 
-typedef struct {
-    double user;
-    double system;
-    double wait;
-    unsigned long context_switches;
-} cpu_stats_t;
+
 
 typedef struct {
     double user_avg;
@@ -34,6 +29,13 @@ typedef struct {
 
 
 
+void use_data(char* str) {
+    volatile char dummy;  // volatile — чтобы компилятор не оптимизировал
+    while (*str) {
+        dummy = *str;  // «используем» каждый символ
+        str++;
+    }
+}
 
 /**
  * @brief Выполняет поиск и замену числа в массиве строк, затем записывает результат в файл
@@ -103,6 +105,7 @@ clock_t memory_work(int number, char array[ARRAY_SIZE][MAX_NUM_LENGTH], int coun
  * @param parallel_processes Указатель для возврата максимального количества параллельных процессов
  * @return clock_t Общее время выполнения операций чтения и записи
  */
+
 clock_t memory_loader(int number, double* user_avg, double* system_avg, double* wait_avg,
                      unsigned long* context_switches_total, unsigned long* context_switches_delta, int* parallel_processes)
 {
@@ -117,13 +120,13 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
     char array[ARRAY_SIZE][MAX_NUM_LENGTH];
     int count = 0;
 
-    const int TARGET_LINES = 10000;      // Сколько случайных строк читать
+    const int TARGET_LINES = 1000000;      // Сколько случайных строк читать
     const long TOTAL_LINES = 10000000L; // Всего строк в файле
 
     // ЧТЕНИЕ СЛУЧАЙНЫХ СТРОК ИЗ ФАЙЛА
-#ifndef O_DIRECT
-#define O_DIRECT 00040000 /* direct disk access hint */
-#endif
+    #ifndef O_DIRECT
+    #define O_DIRECT 00040000 /* direct disk access hint */
+    #endif
 
     int fd = open("fragments_numbers.txt", O_RDONLY | O_DIRECT);
     if (fd == -1) {
@@ -146,12 +149,12 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
 
     // Генерируем 10 000 случайных номеров строк (1..10 000 000)
     srand(time(NULL) ^ (unsigned int)pthread_self());
-        int* random_line_nums = calloc(TARGET_LINES, sizeof(int));
-        if (!random_line_nums) {
-            fclose(ptr);
-            *user_avg = *system_avg = *wait_avg = -1.0;
-            return 1;
-        }
+    int* random_line_nums = calloc(TARGET_LINES, sizeof(int));
+    if (!random_line_nums) {
+        fclose(ptr);
+        *user_avg = *system_avg = *wait_avg = -1.0;
+        return 1;
+    }
 
     // Мониторинг во время чтения
     pthread_t monitoring_thread_read;
@@ -167,9 +170,6 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
 
     if (pthread_create(&monitoring_thread_read, NULL, cpu_monitoring, NULL) == 0) {
         pthread_create(&process_monitor_thread_id, NULL, process_monitor_thread, &process_monitor);
-
-        
-        
 
         for (int i = 0; i < TARGET_LINES; i++) {
             random_line_nums[i] = rand() % TOTAL_LINES + 1;
@@ -224,6 +224,7 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
             }
         }
     }
+    for (int index = 0; index < ARRAY_SIZE; index++){use_data(array[index]);}
 
     clock_t end_read = clock();
     fclose(ptr); // Закрываем файл
