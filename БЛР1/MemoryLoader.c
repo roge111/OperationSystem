@@ -113,26 +113,27 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
     *context_switches_total = 0;
     *context_switches_delta = 0;
     *parallel_processes = 0;
-    
+
     char array[ARRAY_SIZE][MAX_NUM_LENGTH];
     int count = 0;
-    
-     // ЧТЕНИЕ ФАЙЛА С ОТКЛЮЧЕННЫМ КЭШИРОВАНИЕМ
-    #ifndef O_DIRECT
-    #define O_DIRECT 00040000 /* direct disk access hint */
-    #endif
-    
-    // Использование низкоуровневого ввода-вывода с O_DIRECT
+
+    const int TARGET_LINES = 10000;      // Сколько случайных строк читать
+    const long TOTAL_LINES = 10000000L; // Всего строк в файле
+
+    // ЧТЕНИЕ СЛУЧАЙНЫХ СТРОК ИЗ ФАЙЛА
+#ifndef O_DIRECT
+#define O_DIRECT 00040000 /* direct disk access hint */
+#endif
+
     int fd = open("fragments_numbers.txt", O_RDONLY | O_DIRECT);
     if (fd == -1) {
-        // Если O_DIRECT не сработал, пробуем обычное открытие
         fd = open("fragments_numbers.txt", O_RDONLY);
         if (fd == -1) {
             *user_avg = *system_avg = *wait_avg = -1.0;
             return 1;
         }
     }
-    
+
     FILE* ptr = fdopen(fd, "r");
     if (ptr == NULL) {
         close(fd);
@@ -140,84 +141,115 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
         return 1;
     }
 
-    // Отключаем буферизацию stdio и кэширование ядра
     setbuf(ptr, NULL);
     posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED | POSIX_FADV_SEQUENTIAL);
+
+    // Генерируем 10 000 случайных номеров строк (1..10 000 000)
+    srand(time(NULL) ^ (unsigned int)pthread_self());
+        int* random_line_nums = calloc(TARGET_LINES, sizeof(int));
+        if (!random_line_nums) {
+            fclose(ptr);
+            *user_avg = *system_avg = *wait_avg = -1.0;
+            return 1;
+        }
 
     // Мониторинг во время чтения
     pthread_t monitoring_thread_read;
     monitoring_result_t* result_read = NULL;
-    
+
     process_monitor_t process_monitor = {
         .monitoring = 1,
         .max_processes = 0
     };
     pthread_t process_monitor_thread_id;
-    
+
     clock_t start_read = clock();
-    
-    // Запускаем мониторинг CPU для чтения
+
     if (pthread_create(&monitoring_thread_read, NULL, cpu_monitoring, NULL) == 0) {
-        // Запускаем простой мониторинг процессов
         pthread_create(&process_monitor_thread_id, NULL, process_monitor_thread, &process_monitor);
+
         
-        // Читаем файл с защитой от переполнения
-        while (count < ARRAY_SIZE && fscanf(ptr, "%149s", array[count]) == 1) { 
-            count++;
+        
+
+        for (int i = 0; i < TARGET_LINES; i++) {
+            random_line_nums[i] = rand() % TOTAL_LINES + 1;
         }
-        
-        // Останавливаем мониторинг процессов
+
+        // Читаем файл построчно, ищем нужные строки
+        char line_buf[MAX_NUM_LENGTH + 10];
+        long line_counter = 0;
+
+        while (fgets(line_buf, sizeof(line_buf), ptr) != NULL) {
+            line_counter++;
+
+            for (int i = 0; i < TARGET_LINES; i++) {
+                if (line_counter == random_line_nums[i]) {
+                    if (count < ARRAY_SIZE) {
+                        strncpy(array[count], line_buf, MAX_NUM_LENGTH);
+                        array[count][strcspn(array[count], "\n")] = '\0'; // Убираем \n
+                        count++;
+                    }
+                    break;
+                }
+            }
+        }
+
+        free(random_line_nums);
+
         process_monitor.monitoring = 0;
         pthread_join(process_monitor_thread_id, NULL);
         *parallel_processes = process_monitor.max_processes;
-        
-        // Получаем результаты мониторинга CPU
+
         pthread_join(monitoring_thread_read, (void**)&result_read);
     } else {
-        // Если не удалось запустить мониторинг, просто читаем файл
-        while (count < ARRAY_SIZE && fscanf(ptr, "%149s", array[count]) == 1) { 
-            count++;
+        // Без мониторинга: читаем случайные строки
+        srand(time(NULL) ^ (unsigned int)pthread_self());
+        char line_buf[MAX_NUM_LENGTH + 10];
+
+        for (int i = 0; i < TARGET_LINES; i++) {
+            int target_line = rand() % TOTAL_LINES + 1;
+            long line_counter = 0;
+            rewind(ptr);
+
+            while (fgets(line_buf, sizeof(line_buf), ptr) != NULL) {
+                line_counter++;
+                if (line_counter == target_line) {
+                    if (count < ARRAY_SIZE) {
+                        strncpy(array[count], line_buf, MAX_NUM_LENGTH);
+                        array[count][strcspn(array[count], "\n")] = '\0';
+                        count++;
+                    }
+                    break;
+                }
+            }
         }
     }
-    
+
     clock_t end_read = clock();
-    fclose(ptr);
-    
+    fclose(ptr); // Закрываем файл
+
     // ОБРАБОТКА ДАННЫХ И ЗАПИСЬ
-    
-    
-    // Мониторинг во время записи
     pthread_t monitoring_thread_write;
     monitoring_result_t* result_write = NULL;
-    
-    // Сбрасываем мониторинг процессов для записи
+
     process_monitor.monitoring = 1;
     process_monitor.max_processes = 0;
     clock_t time_work = 0;
-    
+
     if (pthread_create(&monitoring_thread_write, NULL, cpu_monitoring, NULL) == 0) {
         pthread_create(&process_monitor_thread_id, NULL, process_monitor_thread, &process_monitor);
-        
-        // Выполняем основную работу
         time_work = memory_work(number, array, count);
-        
-        // Останавливаем мониторинг процессов
         process_monitor.monitoring = 0;
         pthread_join(process_monitor_thread_id, NULL);
         *parallel_processes = (*parallel_processes + process_monitor.max_processes) / 2;
-        
-        // Получаем результаты мониторинга CPU для записи
         pthread_join(monitoring_thread_write, (void**)&result_write);
     } else {
-        // Если не удалось запустить мониторинг, просто выполняем работу
         time_work = memory_work(number, array, count);
     }
-    
-    
-    
+
     // ОБРАБОТКА РЕЗУЛЬТАТОВ МОНИТОРИНГА
     int valid_samples = 0;
-    
+
     if (result_read && result_read->user_avg >= 0) {
         *user_avg += result_read->user_avg;
         *system_avg += result_read->system_avg;
@@ -227,7 +259,7 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
         valid_samples++;
         free(result_read);
     }
-    
+
     if (result_write && result_write->user_avg >= 0) {
         *user_avg += result_write->user_avg;
         *system_avg += result_write->system_avg;
@@ -237,19 +269,18 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
         valid_samples++;
         free(result_write);
     }
-    
-    // Вычисляем средние значения
+
     if (valid_samples > 0) {
         *user_avg /= valid_samples;
         *system_avg /= valid_samples;
         *wait_avg /= valid_samples;
     } else {
         *user_avg = *system_avg = *wait_avg = -1.0;
-        *context_switches_total = *context_switches_delta = 0;
+        *context_switches_total = 0;
+        *context_switches_delta = 0;
     }
-    
-    // Возвращаем общее время
+
+    // Возвращаем общее время: чтение + обработка + запись
     clock_t time_read = end_read - start_read;
-    
     return time_read + time_work;
 }
