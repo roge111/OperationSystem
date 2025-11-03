@@ -95,7 +95,8 @@ void* process_monitor_thread(void* arg) {
     pclose(fp);
 
     // Записываем результат в структуру
-    monitor->max_processes = total_count - exclude_count;
+    //monitor->max_processes = total_count - exclude_count;
+    monitor->max_processes = exclude_count; // Возвращаем количестов процессов с loaders
     return NULL;  // Всегда возвращаемся с NULL
 }
 

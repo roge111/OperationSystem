@@ -6,19 +6,35 @@
 #include "CpuLoader.h"
 #include "MemoryLoader.h"
 
+/**
+ * @brief Структура для хранения данных потока
+ *
+ * Содержит информацию о потоке, включая идентификатор,
+ * данные для нагрузки и результаты выполнения.
+ */
 typedef struct {
-    int thread_id;
-    int number;
-    char* text;
-    clock_t execution_time;
-    double user_avg;
-    double system_avg;
-    double wait_avg;
-    unsigned long context_switches_total;
-    unsigned long context_switches_delta;
-    int parallel_processes;
+    int thread_id;                /**< Идентификатор потока */
+    int number;                   /**< Число для передачи в memory_loader */
+    char* text;                   /**< Текст для передачи в cpu_loader */
+    clock_t execution_time;       /**< Время выполнения потока */
+    double user_avg;              /**< Среднее время в пользовательском режиме */
+    double system_avg;            /**< Среднее время в системном режиме */
+    double wait_avg;              /**< Среднее время ожидания */
+    unsigned long context_switches_total; /**< Общее количество переключений контекста */
+    unsigned long context_switches_delta; /**< Изменение количества переключений контекста */
+    int parallel_processes;       /**< Количество параллельных процессов */
 } thread_data_t;
 
+/**
+ * @brief Функция потока для нагрузки CPU
+ *
+ * Эта функция вызывается в отдельном потоке и выполняет нагрузку на CPU
+ * с помощью функции cpu_loader. Результаты выполнения сохраняются в
+ * структуре thread_data_t.
+ *
+ * @param arg Указатель на структуру thread_data_t с данными для потока
+ * @return NULL
+ */
 void* cpu_loader_thread(void* arg) {
     thread_data_t* data = (thread_data_t*)arg;
     
@@ -45,6 +61,16 @@ void* cpu_loader_thread(void* arg) {
     return NULL;
 }
 
+/**
+ * @brief Функция потока для нагрузки памяти
+ *
+ * Эта функция вызывается в отдельном потоке и выполняет нагрузку на память
+ * с помощью функции memory_loader. Результаты выполнения сохраняются в
+ * структуре thread_data_t.
+ *
+ * @param arg Указатель на структуру thread_data_t с данными для потока
+ * @return NULL
+ */
 void* memory_loader_thread(void* arg) {
     thread_data_t* data = (thread_data_t*)arg;
     
@@ -71,6 +97,17 @@ void* memory_loader_thread(void* arg) {
     return NULL;
 }
 
+/**
+ * @brief Основная функция программы
+ *
+ * Создает потоки для нагрузки CPU и памяти в соответствии с аргументами
+ * командной строки. Агрегирует результаты выполнения потоков и выводит
+ * их в стандартный вывод.
+ *
+ * @param argc Количество аргументов командной строки
+ * @param argv Массив аргументов командной строки
+ * @return 0 в случае успешного выполнения, 1 в случае ошибки
+ */
 int main(int argc, char *argv[]) {
     // Парсинг аргументов командной строки
     if (argc < 3) {
@@ -150,7 +187,7 @@ int main(int argc, char *argv[]) {
     unsigned long total_context_switches_delta = 0;
     int total_process = 0;
     clock_t total_cpu_time = 0, total_memory_time = 0;
-    
+    // Собираем результаты с нагрузки CPU
     for (int i = 0; i < count_cpu_loader; i++) {
         total_cpu_time += cpu_data[i].execution_time;
         total_user_avg += cpu_data[i].user_avg;
@@ -160,7 +197,8 @@ int main(int argc, char *argv[]) {
         total_process += cpu_data[i].parallel_processes;
         
     }
-    
+
+    //Собираем результаты с нагрузки на память    
     for (int i = 0; i < count_memory_loader; i++) {
         total_memory_time += memory_data[i].execution_time;
         total_user_avg += memory_data[i].user_avg;

@@ -37,9 +37,9 @@ def save_fragments_to_file(fragments, filename):
                 f.write(cleaned_frag + '\n')
 
 # Генерация 100 000 фрагментов
-fragments = generate_fragments(10000)
+fragments = generate_fragments(10_000_000)
 
 # Сохранение в файл
-save_fragments_to_file(fragments, 'fragments_numbers.txt')
+save_fragments_to_file(fragments, 'fragments_numbers_2.txt')
 
 print(f"Сгенерировано {len(fragments)} фрагментов")
