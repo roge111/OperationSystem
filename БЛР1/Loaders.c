@@ -147,7 +147,7 @@ int main(int argc, char *argv[]) {
     memset(cpu_data, 0, sizeof(cpu_data));
     memset(memory_data, 0, sizeof(memory_data));
     
-    clock_t total_start = clock();
+    
     
     // Запуск потоков CPU
     for (int i = 0; i < count_cpu_loader; i++) {
@@ -180,7 +180,7 @@ int main(int argc, char *argv[]) {
         pthread_join(memory_threads[i], NULL);
     }
     
-    clock_t total_end = clock();
+    
     
     // Агрегация результатов (упрощенная)
     double total_user_avg = 0.0, total_system_avg = 0.0, total_wait_avg = 0.0;

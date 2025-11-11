@@ -8,7 +8,7 @@ def run_c_loader_args(count_cpu, count_memory, memory_number=None):
     Запускает C программу с передачей параметров через аргументы
     """
     # Формируем команду
-    cmd = ['./loaders', str(count_cpu), str(count_memory)]
+    cmd = ['./loaders_o', str(count_cpu), str(count_memory)]
     
     if count_memory > 0 and memory_number is not None:
         cmd.append(str(memory_number))

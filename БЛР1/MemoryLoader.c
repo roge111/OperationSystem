@@ -33,7 +33,9 @@ void use_data(char* str) {
     volatile char dummy;  // volatile — чтобы компилятор не оптимизировал
     while (*str) {
         dummy = *str;  // «используем» каждый символ
+        (void)dummy;   
         str++;
+    
     }
 }
 
@@ -128,9 +130,9 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
     #define O_DIRECT 00040000 /* direct disk access hint */
     #endif
 
-    int fd = open("fragments_numbers.txt", O_RDONLY | O_DIRECT);
+    int fd = open("fragments_numbers_1.txt", O_RDONLY | O_DIRECT);
     if (fd == -1) {
-        fd = open("fragments_numbers.txt", O_RDONLY);
+        fd = open("fragments_numbers_1.txt", O_RDONLY);
         if (fd == -1) {
             *user_avg = *system_avg = *wait_avg = -1.0;
             return 1;
