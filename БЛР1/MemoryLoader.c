@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/time.h>
 
 #include "CpuLoader.h"
 
@@ -28,6 +29,104 @@ typedef struct {
     volatile int monitoring;
     int max_processes;
 } process_monitor_t;
+
+
+
+
+#define BLOCK_SIZE (1024 * 1024)  // 1 МБ
+
+
+/**
+ * @brief Выполняет случайное чтение блока данных из файла и измеряет время операции
+ *
+ * Функция открывает файл, определяет его размер, генерирует случайное смещение
+ * в пределах файла и читает блок данных размером BLOCK_SIZE по этому смещению.
+ * Измеряется время выполнения операции чтения.
+ *
+ * @param filename Имя файла для чтения
+ * @return double Время выполнения операции чтения в микросекундах, 0.0 в случае ошибки
+ */
+double randomReadTest(const char* filename, int number) {
+
+    #ifndef O_DIRECT
+    #define O_DIRECT 00040000 /* direct disk access hint */
+    #endif
+
+    int fd = open("fragments_numbers_1.txt", O_RDONLY | O_DIRECT);
+    if (fd == -1) {
+        fd = open("fragments_numbers_1.txt", O_RDONLY);
+        if (fd == -1) {
+            
+            return -1.0;
+        }
+    }
+
+    FILE* ptr = fdopen(fd, "r");
+    
+
+    setbuf(ptr, NULL);
+    posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED | POSIX_FADV_SEQUENTIAL);
+
+    // Определяем размер файла
+    if (fseek(ptr, 0, SEEK_END) != 0) {  // Перемещаемся в конец
+        fclose(ptr);
+        return 0.0;
+    }
+    long file_size = ftell(ptr);  // Получаем размер
+
+    // Проверяем размер файла, что он не меньше размера блока
+    if (file_size == -1 || file_size <= (long)BLOCK_SIZE) {
+        fclose(ptr);
+        return 0.0;  
+    }
+
+    // Возвращаемся в начало, чтобы потом позиционироваться
+    if (fseek(ptr, 0, SEEK_SET) != 0) {
+        fclose(ptr);
+        return 0.0;
+    }
+
+    // Буфер для чтения
+    char* buffer = (char*)malloc(BLOCK_SIZE);
+    if (!buffer) {
+        fclose(ptr);
+        return 0.0;
+    }
+
+    // Генерация случайного смещения (в пределах [0, file_size - BLOCK_SIZE])
+    srand((unsigned int)time(NULL));
+    long offset = rand() % (file_size - (long)BLOCK_SIZE);
+
+    // Перемещаемся на случайную позицию
+    if (fseek(ptr, offset, SEEK_SET) != 0) {
+        free(buffer);
+        fclose(ptr);
+        return 0.0;
+    }
+
+    // Замер времени
+    clock_t start_read = clock();
+    
+
+    // Чтение блока данных
+    size_t bytesRead = fread(buffer, 1, BLOCK_SIZE, ptr);
+
+    clock_t end_read = clock();
+
+    // Освобождение ресурсов
+    free(buffer);
+    fclose(ptr);
+
+    // Проверка успешности чтения
+    if (bytesRead != BLOCK_SIZE) {
+        return 0.0;
+    }
+
+    // Вычисление времени в микросекундах
+    
+    return end_read - start_read;
+}
+
 
 
 
@@ -128,28 +227,9 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
     const long TOTAL_LINES = 10000000L; // Всего строк в файле
 
     // ЧТЕНИЕ СЛУЧАЙНЫХ СТРОК ИЗ ФАЙЛА
-    #ifndef O_DIRECT
-    #define O_DIRECT 00040000 /* direct disk access hint */
-    #endif
 
-    int fd = open("fragments_numbers_1.txt", O_RDONLY | O_DIRECT);
-    if (fd == -1) {
-        fd = open("fragments_numbers_1.txt", O_RDONLY);
-        if (fd == -1) {
-            *user_avg = *system_avg = *wait_avg = -1.0;
-            return 1;
-        }
-    }
 
-    FILE* ptr = fdopen(fd, "r");
-    if (ptr == NULL) {
-        close(fd);
-        *user_avg = *system_avg = *wait_avg = -1.0;
-        return 1;
-    }
-
-    setbuf(ptr, NULL);
-    posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED | POSIX_FADV_SEQUENTIAL);
+    
 
     // Генерируем 10 000 случайных номеров строк (1..10 000 000)
     srand(time(NULL) ^ (unsigned int)pthread_self());
@@ -170,35 +250,12 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
     };
     pthread_t process_monitor_thread_id;
 
-    clock_t start_read = clock();
+    
 
     if (pthread_create(&monitoring_thread_read, NULL, cpu_monitoring, NULL) == 0) {
         pthread_create(&process_monitor_thread_id, NULL, process_monitor_thread, &process_monitor);
-
-        for (int i = 0; i < TARGET_LINES; i++) {
-            random_line_nums[i] = rand() % TOTAL_LINES + 1;
-        }
-
-        // Читаем файл построчно, ищем нужные строки
-        char line_buf[MAX_NUM_LENGTH + 10];  // Буфер для строки, длина увеличина на 10 для безопасности
-        long line_counter = 0;
-
-        while (fgets(line_buf, sizeof(line_buf), ptr) != NULL) {
-            line_counter++;
-
-            for (int i = 0; i < TARGET_LINES; i++) {
-                if (line_counter == random_line_nums[i]) {
-                    if (count < ARRAY_SIZE) {
-                        strncpy(array[count], line_buf, MAX_NUM_LENGTH);
-                        array[count][strcspn(array[count], "\n")] = '\0'; // Убираем \n
-                        count++;
-                    }
-                    break;
-                }
-            }
-        }
-
-        free(random_line_nums);
+        // Вставляем код чтения блоков
+        for (int i)
 
         process_monitor.monitoring = 0;
         pthread_join(process_monitor_thread_id, NULL);
@@ -207,31 +264,12 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
         pthread_join(monitoring_thread_read, (void**)&result_read);
     } else {
         // Без мониторинга: читаем случайные строки
-        srand(time(NULL) ^ (unsigned int)pthread_self());
-        char line_buf[MAX_NUM_LENGTH + 10];
-
-        for (int i = 0; i < TARGET_LINES; i++) {
-            int target_line = rand() % TOTAL_LINES + 1;
-            long line_counter = 0;
-            rewind(ptr);
-
-            while (fgets(line_buf, sizeof(line_buf), ptr) != NULL) {
-                line_counter++;
-                if (line_counter == target_line) {
-                    if (count < ARRAY_SIZE) {
-                        strncpy(array[count], line_buf, MAX_NUM_LENGTH);
-                        array[count][strcspn(array[count], "\n")] = '\0';
-                        count++;
-                    }
-                    break;
-                }
-            }
-        }
+        
     }
     for (int index = 0; index < ARRAY_SIZE; index++){use_data(array[index]);}
 
-    clock_t end_read = clock();
-    fclose(ptr); // Закрываем файл
+   
+    // Закрываем файл
 
     // ОБРАБОТКА ДАННЫХ И ЗАПИСЬ
     pthread_t monitoring_thread_write;
