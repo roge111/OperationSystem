@@ -8,6 +8,8 @@
 
 #include "CpuLoader.h"
 
+// Чтение текста блоками мелкого размера (как в прошлом году)
+// Найти блок с числом для замены, заменить его, и записать в файл тот же
 
 #define ARRAY_SIZE 10000
 #define MAX_NUM_LENGTH 150
@@ -151,7 +153,7 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
 
     // Генерируем 10 000 случайных номеров строк (1..10 000 000)
     srand(time(NULL) ^ (unsigned int)pthread_self());
-    int* random_line_nums = calloc(TARGET_LINES, sizeof(int));
+    int* random_line_nums = calloc(TARGET_LINES, sizeof(int)); //  ! Последовательная память
     if (!random_line_nums) {
         fclose(ptr);
         *user_avg = *system_avg = *wait_avg = -1.0;
@@ -178,7 +180,7 @@ clock_t memory_loader(int number, double* user_avg, double* system_avg, double* 
         }
 
         // Читаем файл построчно, ищем нужные строки
-        char line_buf[MAX_NUM_LENGTH + 10];
+        char line_buf[MAX_NUM_LENGTH + 10];  // Буфер для строки, длина увеличина на 10 для безопасности
         long line_counter = 0;
 
         while (fgets(line_buf, sizeof(line_buf), ptr) != NULL) {
