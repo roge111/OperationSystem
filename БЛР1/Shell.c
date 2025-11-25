@@ -256,7 +256,7 @@ void cmd_echo(char **args, int argc) {
 }
 
 void cmd_short_path(char *path) {
-    char buf[PATH_MAX];
+    char buf[4096];
     if (realpath(path, buf) != NULL) {
         printf("%s\n", buf);
     } else {
