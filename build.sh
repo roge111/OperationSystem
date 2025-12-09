@@ -1,2 +1,2 @@
 #!/bin/bash
-gcc -o shell Shell.c -Wall -Werror
+gcc -o shell БЛР1/Shell.c -Wall -Werror
