@@ -31,7 +31,7 @@ jobs:
 
       # 4. Запустить тесты
       - name: Run tests
-        run: python3 testing_shell.py
+        run: python3 БЛР1/testing_shell.py
 
       # 5. Очистить после тестов (опционально)
       - name: Clean up
