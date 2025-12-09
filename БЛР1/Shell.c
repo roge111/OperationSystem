@@ -9,17 +9,32 @@
 #include <sys/types.h>
 #include <limits.h>
 
+// Структура для хранения информации о перенаправлении
+typedef struct {
+    char *input_file;
+    char *output_file;
+    int append;
+    int syntax_error;
+} redirection_info_t;
+
 // Вспомогательные функции для встроенных команд
 void cmd_cd(char *path);
 void cmd_pwd();
 void cmd_ls(char *path);
-void cmd_echo(char **args, int argc);
+void cmd_echo(char **args, int argc, redirection_info_t *redir_info);
 void cmd_short_path(char *path);
 void cmd_cls();
 void cmd_help();
 
-// Выполнение встроенной команды в дочернем процессе
-int execute_builtin(char **args, int argc) {
+/**
+ * @brief Выполнение встроенной команды в дочернем процессе
+ *
+ * @param args Массив аргументов команды
+ * @param argc Количество аргументов
+ * @param redir_info Информация о перенаправлении
+ * @return int 1 если команда встроенная и была выполнена, 0 если команда не встроенная
+ */
+int execute_builtin(char **args, int argc, redirection_info_t *redir_info) {
     if (argc == 0) return 0;
 
     if (strcmp(args[0], "cd") == 0) {
@@ -35,7 +50,7 @@ int execute_builtin(char **args, int argc) {
         return 1;
     }
     if (strcmp(args[0], "echo") == 0) {
-        cmd_echo(args, argc);
+        cmd_echo(args, argc, redir_info);
         return 1;
     }
     if (strcmp(args[0], "short-path") == 0) {
@@ -53,19 +68,80 @@ int execute_builtin(char **args, int argc) {
     return 0; // Не встроенная команда
 }
 
-// Разбиение строки на аргументы
-int parse_args(char *line, char **args) {
+
+/**
+ * @brief Разбиение строки на аргументы с учетом перенаправления
+ *
+ * @param line Входная строка для разбора
+ * @param args Массив для хранения аргументов
+ * @param redir_info Структура для хранения информации о перенаправлении
+ * @return int Количество найденных аргументов
+ */
+int parse_args_with_redirection(char *line, char **args, redirection_info_t *redir_info) {
     int argc = 0;
     char *token = strtok(line, " \t\n");
+    
+    // Инициализация структуры перенаправления
+    redir_info->input_file = NULL;
+    redir_info->output_file = NULL;
+    redir_info->append = 0;
+    redir_info->syntax_error = 0;
+    
     while (token != NULL && argc < 63) {
-        args[argc++] = token;
+        // Проверяем перенаправление ввода
+        if (strcmp(token, "<") == 0) {
+            token = strtok(NULL, " \t\n");
+            if (token == NULL || redir_info->input_file != NULL) {
+                redir_info->syntax_error = 1;
+                return 0;
+            }
+            redir_info->input_file = token;
+        }
+        // Проверяем перенаправление вывода
+        else if (strcmp(token, ">") == 0) {
+            token = strtok(NULL, " \t\n");
+            if (token == NULL || redir_info->output_file != NULL) {
+                redir_info->syntax_error = 1;
+                return 0;
+            }
+            redir_info->output_file = token;
+            redir_info->append = 0;
+        }
+        // Проверяем перенаправление вывода с добавлением
+        else if (strcmp(token, ">>") == 0) {
+            // >> не поддерживается согласно тестам
+            redir_info->syntax_error = 1;
+            return 0;
+        }
+        // Обычный аргумент
+        else {
+            args[argc++] = token;
+        }
         token = strtok(NULL, " \t\n");
     }
     args[argc] = NULL;
     return argc;
 }
 
-// Функция для разделения команд по &&
+/**
+ * @brief Разбиение строки на аргументы
+ *
+ * @param line Входная строка для разбора
+ * @param args Массив для хранения аргументов
+ * @return int Количество найденных аргументов
+ */
+int parse_args(char *line, char **args) {
+    redirection_info_t redir_info;
+    return parse_args_with_redirection(line, args, &redir_info);
+}
+
+/**
+ * @brief Функция для разделения команд по &&
+ *
+ * @param cmd Входная строка команды
+ * @param commands Массив для хранения разделенных команд
+ * @param cmd_count Указатель на переменную для хранения количества команд
+ */
 void split_commands(char *cmd, char **commands, int *cmd_count) {
     *cmd_count = 0;
     char *start = cmd;
@@ -98,9 +174,52 @@ void split_commands(char *cmd, char **commands, int *cmd_count) {
     }
 }
 
-// Запуск одной команды через vfork
-int run_single_command(char **args, int argc) {
-    if (argc == 0) return 1; // Пустая команда - успех
+/**
+ * @brief Запуск одной команды через vfork с поддержкой перенаправления
+ *
+ * @param args Массив аргументов команды
+ * @param argc Количество аргументов
+ * @param redir_info Структура с информацией о перенаправлении
+ * @return int 1 если команда выполнена успешно, 0 если произошла ошибка
+ */
+int run_single_command_with_redirection(char **args, int argc, redirection_info_t *redir_info) {
+    if (argc == 0) {
+        // Проверяем синтаксические ошибки
+        if (redir_info->syntax_error) {
+            printf("Syntax error\n");
+            return 0;
+        }
+        // Проверяем ошибки ввода/вывода
+        if (redir_info->input_file != NULL) {
+            FILE *file = fopen(redir_info->input_file, "r");
+            if (file == NULL) {
+                printf("I/O error\n");
+                return 0;
+            }
+            fclose(file);
+        }
+        if (redir_info->output_file != NULL) {
+            FILE *file = fopen(redir_info->output_file, "w");
+            if (file == NULL) {
+                printf("I/O error\n");
+                return 0;
+            }
+            fclose(file);
+        }
+        return 1; // Пустая команда - успех
+    }
+    
+    // Проверяем синтаксические ошибки
+    if (redir_info->syntax_error) {
+        printf("Syntax error\n");
+        return 0;
+    }
+    
+    // Обработка cd в родительском процессе (не через vfork)
+    if (strcmp(args[0], "cd") == 0) {
+        cmd_cd(argc > 1 ? args[1] : NULL);
+        return 1;
+    }
     
     pid_t pid = vfork();
     if (pid == -1) {
@@ -109,8 +228,44 @@ int run_single_command(char **args, int argc) {
     }
     
     if (pid == 0) {
-        // Дочерний процесс
-        if (execute_builtin(args, argc)) {
+        // Дочерний процесс - настраиваем перенаправление через dup2
+        int input_fd = -1;
+        int output_fd = -1;
+        
+        // Открываем файл для ввода
+        if (redir_info->input_file != NULL) {
+            input_fd = open(redir_info->input_file, O_RDONLY);
+            if (input_fd == -1) {
+                printf("I/O error\n");
+                _exit(1);
+            }
+            if (dup2(input_fd, STDIN_FILENO) == -1) {
+                printf("I/O error\n");
+                _exit(1);
+            }
+            close(input_fd);
+        }
+        
+        // Открываем файл для вывода
+        if (redir_info->output_file != NULL) {
+            if (redir_info->append) {
+                output_fd = open(redir_info->output_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            } else {
+                output_fd = open(redir_info->output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            }
+            if (output_fd == -1) {
+                printf("I/O error\n");
+                _exit(1);
+            }
+            if (dup2(output_fd, STDOUT_FILENO) == -1) {
+                printf("I/O error\n");
+                _exit(1);
+            }
+            close(output_fd);
+        }
+        
+        // Выполняем команду
+        if (execute_builtin(args, argc, redir_info)) {
             // Встроенная команда выполнена
             _exit(0);
         } else {
@@ -128,13 +283,31 @@ int run_single_command(char **args, int argc) {
     }
 }
 
-// Основная логика выполнения команд с поддержкой &&
+/**
+ * @brief Запуск одной команды через vfork
+ *
+ * @param args Массив аргументов команды
+ * @param argc Количество аргументов
+ * @return int 1 если команда выполнена успешно, 0 если произошла ошибка
+ */
+int run_single_command(char **args, int argc) {
+    redirection_info_t redir_info = {0};
+    return run_single_command_with_redirection(args, argc, &redir_info);
+}
+
+/**
+ * @brief Основная логика выполнения команд с поддержкой &&
+ *
+ * @param cmd Входная строка команды
+ */
 void execute_command(char *cmd) {
     // Удаляем пробелы в начале/конце
     while (*cmd == ' ') cmd++;
     char *end = cmd + strlen(cmd) - 1;
     while (end > cmd && *end == ' ') *end-- = '\0';
-    if (*cmd == '\0') return;
+    if (*cmd == '\0') {
+        return;
+    }
 
     // Разделяем по &&
     char *commands[64] = {0};
@@ -153,24 +326,30 @@ void execute_command(char *cmd) {
         char *cmd_end = cmd_start + strlen(cmd_start) - 1;
         while (cmd_end > cmd_start && *cmd_end == ' ') *cmd_end-- = '\0';
 
-        if (*cmd_start == '\0') continue;
+        if (*cmd_start == '\0') {
+            continue;
+        }
 
-        // Парсим аргументы
+        // Парсим аргументы с учётом перенаправления
         char *args[64] = {0};
-        int argc = parse_args(cmd_start, args);
+        redirection_info_t redir_info = {0};
+        int argc = parse_args_with_redirection(cmd_start, args, &redir_info);
 
-        if (argc == 0) continue;
-
-        // Запускаем команду через vfork
-        should_continue = run_single_command(args, argc);
+        // Запускаем команду через vfork с перенаправлением
+        should_continue = run_single_command_with_redirection(args, argc, &redir_info);
     }
-    
+
     // Освобождаем память
     for (int i = 0; i < cmd_count; i++) {
         free(commands[i]);
     }
 }
 
+/**
+ * @brief Смена текущей директории
+ *
+ * @param path Путь к новой директории (если NULL, используется домашняя директория)
+ */
 void cmd_cd(char *path) {
     if (path == NULL) {
         path = getenv("HOME");
@@ -184,6 +363,9 @@ void cmd_cd(char *path) {
     }
 }
 
+/**
+ * @brief Вывод текущей рабочей директории
+ */
 void cmd_pwd() {
     char buf[1024];
     if (getcwd(buf, sizeof(buf)) != NULL) {
@@ -193,6 +375,11 @@ void cmd_pwd() {
     }
 }
 
+/**
+ * @brief Вывод содержимого директории
+ *
+ * @param path Путь к директории (если NULL, используется текущая директория)
+ */
 void cmd_ls(char *path) {
     DIR *d = opendir(path);
     if (!d) {
@@ -209,52 +396,51 @@ void cmd_ls(char *path) {
     closedir(d);
 }
 
-void cmd_echo(char **args, int argc) {
+/**
+ * @brief Вывод текста на экран с поддержкой перенаправления
+ *
+ * @param args Массив аргументов команды
+ * @param argc Количество аргументов
+ * @param redir_info Информация о перенаправлении
+ */
+void cmd_echo(char **args, int argc, redirection_info_t *redir_info) {
     if (argc < 2) {
         printf("\n");
         return;
     }
     
-    // Ищем перенаправление
-    int redirect_index = -1;
-    int append = 0;
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(args[i], ">") == 0 && i + 1 < argc) {
-            redirect_index = i;
-            append = 0;
-            break;
-        }
-        if (strcmp(args[i], ">>") == 0 && i + 1 < argc) {
-            redirect_index = i;
-            append = 1;
-            break;
-        }
-    }
-    
     FILE *output = stdout;
-    if (redirect_index != -1) {
-        output = fopen(args[redirect_index + 1], append ? "a" : "w");
+    
+    // Используем информацию о перенаправлении из redir_info
+    if (redir_info != NULL && redir_info->output_file != NULL) {
+        output = fopen(redir_info->output_file, redir_info->append ? "a" : "w");
         if (!output) {
-            printf("echo: cannot open %s: %s\n", args[redirect_index + 1], strerror(errno));
+            printf("I/O error\n");
             return;
         }
     }
     
-    // Выводим текст до перенаправления
-    int end_index = (redirect_index == -1) ? argc : redirect_index;
-    for (int i = 1; i < end_index; i++) {
+    // Выводим все аргументы (кроме команды echo)
+    for (int i = 1; i < argc; i++) {
         fprintf(output, "%s", args[i]);
-        if (i < end_index - 1) {
+        if (i < argc - 1) {
             fprintf(output, " ");
         }
     }
     fprintf(output, "\n");
     
-    if (redirect_index != -1) {
+    if (redir_info != NULL && redir_info->output_file != NULL) {
         fclose(output);
+        // НЕ выводим ничего в stdout при перенаправлении в файл
+        return;
     }
 }
 
+/**
+ * @brief Вывод полного пути к файлу или директории
+ *
+ * @param path Путь к файлу или директории
+ */
 void cmd_short_path(char *path) {
     char buf[4096];
     if (realpath(path, buf) != NULL) {
@@ -264,10 +450,16 @@ void cmd_short_path(char *path) {
     }
 }
 
+/**
+ * @brief Очистка экрана
+ */
 void cmd_cls() {
     printf("\033[H\033[J");
 }
 
+/**
+ * @brief Вывод справки по доступным командам
+ */
 void cmd_help() {
     printf("Available commands:\n");
     printf("  cd [dir]     - Change directory\n");
@@ -281,22 +473,49 @@ void cmd_help() {
     printf("Use && to chain commands\n");
 }
 
-int main() {
-    char command[1024];
+/**
+ * @brief Основная функция программы - точка входа в оболочку
+ *
+ * @return int Код возврата программы
+ */
+int main(int argc, char *argv[]) {
+    char command[1024] = {0};
 
-    printf("Simple Shell for Ubuntu (type 'exit' to quit)\n");
-    while (1) {
-        printf("$ ");
-        if (fgets(command, sizeof(command), stdin) == NULL) break;
-
-        // Удаляем \n
-        command[strcspn(command, "\n")] = '\0';
-
-        if (strcmp(command, "exit") == 0) break;
-
+    // Если передана команда как аргумент, используем её
+    if (argc > 1) {
+        // Собираем все аргументы в одну строку
+        int pos = 0;
+        for (int i = 1; i < argc && pos < sizeof(command) - 1; i++) {
+            if (i > 1 && pos < sizeof(command) - 2) {
+                command[pos++] = ' ';
+            }
+            int arg_len = strlen(argv[i]);
+            if (pos + arg_len < sizeof(command) - 1) {
+                strcpy(command + pos, argv[i]);
+                pos += arg_len;
+            } else {
+                // Обрезаем, если команда слишком длинная
+                strncpy(command + pos, argv[i], sizeof(command) - pos - 1);
+                command[sizeof(command) - 1] = '\0';
+                break;
+            }
+        }
         execute_command(command);
-    }
+    } else {
+        // Интерактивный режим (для тестирования)
+        printf("Simple Shell for Ubuntu (type 'exit' to quit)\n");
+        while (1) {
+            printf("$ ");
+            if (fgets(command, sizeof(command), stdin) == NULL) break;
 
-    printf("Goodbye!\n");
+            // Удаляем \n
+            command[strcspn(command, "\n")] = '\0';
+
+            if (strcmp(command, "exit") == 0) break;
+
+            execute_command(command);
+        }
+        printf("Goodbye!\n");
+    }
     return 0;
 }
