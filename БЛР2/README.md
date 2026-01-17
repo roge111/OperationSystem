@@ -281,9 +281,12 @@ static void move_to_front(CacheBlock *block) {
 
 Сначала выполним проверку, что блок не в начале списка.
 
-Проверим, есть ли у блока предыдущий блок. Если есть, то ставим у предыдущего блока следующим тот блок, что следующий от текущего. И то же самое касается предыдущего.
-----
+Проверим, есть ли у блока предыдущий блок. 
+
+Если есть, то ставим у предыдущего блока следующим тот блок, что следующий от текущего. И то же самое касается предыдущего.
+
 ДЛЯ СЕБЯ
+---
 
 `block->prev->next = block->next;` - игра указателей.
 Представим, что есть блок A, B и C
@@ -368,53 +371,55 @@ static void read_block_from_disk(CacheBlock *block) {
 ```
 FileInfo *file_info = open_files[block->fd];
     if (!file_info) return;
-    ```
+```
 
-    Дальше вычисление позиции на диске
-    ```
-    off_t pos = block->block_number * BLOCK_SIZE;
-    ```
-    
-    Сохраняем текущую позицию в файле, чтобы потом вернуться
-    ```
-    off_t old_pos = raw_lseek(file_info->fd, 0, SEEK_CUR);
-    ```
-    
-    Перемещаемся в нужную позицию для чтения блока
-    ```
-    if (old_pos < 0 || raw_lseek(file_info->fd, pos, SEEK_SET) < 0) {
-        if (old_pos >= 0) raw_lseek(file_info->fd, old_pos, SEEK_SET);
+Дальше вычисление позиции на диске
+```
+off_t pos = block->block_number * BLOCK_SIZE;
+```
+
+Сохраняем текущую позицию в файле, чтобы потом вернуться
+```
+off_t old_pos = raw_lseek(file_info->fd, 0, SEEK_CUR);
+```
+
+Перемещаемся в нужную позицию для чтения блока
+```
+if (old_pos < 0 || raw_lseek(file_info->fd, pos, SEEK_SET) < 0) {
+    if (old_pos >= 0) raw_lseek(file_info->fd, old_pos, SEEK_SET);
+    raw_memset(block->data, 0, BLOCK_SIZE);
+    return;
+}
+```
+
+Читаем данные блока
+```
+ssize_t bytes = raw_read(file_info->fd, block->data, BLOCK_SIZE);
+```
+
+Возвращаемся в исходную позицию
+```
+raw_lseek(file_info->fd, old_pos, SEEK_SET);
+```
+
+Если прочитали меньше, чем размер блока, заполняем остаток нулями
+```
+if (bytes < BLOCK_SIZE) {
+    if (bytes > 0) {
+        raw_memset(block->data + bytes, 0, BLOCK_SIZE - bytes);
+    } else {
         raw_memset(block->data, 0, BLOCK_SIZE);
-        return;
     }
-    ```
-    
-    Читаем данные блока
-    ```
-    ssize_t bytes = raw_read(file_info->fd, block->data, BLOCK_SIZE);
-    ```
-    
-    Возвращаемся в исходную позицию
-    ```
-    raw_lseek(file_info->fd, old_pos, SEEK_SET);
-    ```
-    
-    Если прочитали меньше, чем размер блока, заполняем остаток нулями
-    ```
-    if (bytes < BLOCK_SIZE) {
-        if (bytes > 0) {
-            raw_memset(block->data + bytes, 0, BLOCK_SIZE - bytes);
-        } else {
-            raw_memset(block->data, 0, BLOCK_SIZE);
-        }
-    }
-    ```
-    
-    Сбрасываем флаг "грязного" блока и обновляем время последнего доступа
-    ```
-    block->dirty = 0;
-    block->last_access = raw_time();
-    ```
+}
+```
+
+Сбрасываем флаг "грязного" блока и обновляем время последнего доступа
+
+```
+block->dirty = 0;
+block->last_access = raw_time();
+```
+
 
 Реализуем функцию записи блока на диск:
 ```
@@ -661,6 +666,7 @@ API функции
 int vtpc_open(const char *path) - открывает файл и возвращает дескриптор:
 
 Эта функция открывает файл и возвращает виртуальный дескриптор файла для использования с другими функциями API.
+```
 
 Процесс открытия файла:
 1. Проверяем, была ли инициализирована система кэширования:
@@ -721,7 +727,7 @@ int vtpc_open(const char *path) - открывает файл и возвращ�
 int vtpc_close(int fd) - закрывает файл по дескриптору:
 
 Эта функция закрывает файл и освобождает все связанные с ним ресурсы.
-
+```
 Процесс закрытия файла:
 1. Проверяем корректность дескриптора:
    ```
@@ -779,7 +785,7 @@ int vtpc_close(int fd) - закрывает файл по дескриптору
 ssize_t vtpc_read(int fd, void *buf, size_t count) - читает данные из файла:
 
 Эта функция читает указанное количество байт из файла в буфер.
-
+```
 Процесс чтения данных:
 1. Проверяем корректность параметров:
    ```
@@ -836,7 +842,7 @@ ssize_t vtpc_read(int fd, void *buf, size_t count) - читает данные �
 ssize_t vtpc_write(int fd, const void *buf, size_t count) - записывает данные в файл:
 
 Эта функция записывает указанное количество байт из буфера в файл.
-
+```
 Процесс записи данных:
 1. Проверяем корректность параметров:
    ```
@@ -952,7 +958,7 @@ off_t vtpc_lseek(int fd, off_t offset, int whence) - перемещает ука
 int vtpc_fsync(int fd) - синхронизирует данные файла с диском:
 
 Эта функция записывает все "грязные" блоки файла на диск и вызывает системный fsync.
-
+```
 Процесс синхронизации:
 1. Проверяем корректность дескриптора:
    ```
