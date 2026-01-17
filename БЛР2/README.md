@@ -120,8 +120,8 @@ static void init_cache(void) {
 Дальше реализуем наш очиститель кеша.
 
 ```
-static void cleanup_cache(void) {
-    pthread_mutex_lock(&cache_manager.lock);
+void vtpc_cleanup(void) {
+    spin_lock(&cache_manager.lock);
     
     // Записываем все "грязные" блоки на диск
     CacheBlock *current = cache_manager.head;
@@ -130,7 +130,7 @@ static void cleanup_cache(void) {
             write_block_to_disk(current);
         }
         CacheBlock *next = current->next;
-        free(current);
+        raw_munmap(current, sizeof(CacheBlock));
         current = next;
     }
     
@@ -138,12 +138,63 @@ static void cleanup_cache(void) {
     cache_manager.tail = NULL;
     cache_manager.block_count = 0;
     
-    pthread_mutex_unlock(&cache_manager.lock);
-    pthread_mutex_destroy(&cache_manager.lock);
+    spin_unlock(&cache_manager.lock);
+    
+    // Закрываем все открытые файлы
+    for (int i = 0; i < 1024; i++) {
+        if (open_files[i] != NULL) {
+            FileInfo *info = open_files[i];
+            raw_close(info->fd);
+            raw_munmap(info, sizeof(FileInfo));
+            open_files[i] = NULL;
+        }
+    }
 }
 ```
-Он будет записывать все "грязные" блоки на диск и сбрасывать все показатели в начальные значения. Такая функция пригодиться особенно когда программа закончила работу.  О функции `write_block_to_disk` поговорим позже. 
-В начале мы устанавливаем блокировку кеша, чтобы не было конфликтов. Затем мы итерируемся по всем блокам кеша и записываем "грязные" блоки на диск. Затем мы устанавливаем начальные значения для всех показателей кеша. В конце мы снимаем блокировку кеша.
+Эта функция выполняет полную очистку кэша, записывая все "грязные" блоки на диск и освобождая память.
+
+Процесс очистки кэша:
+1. Блокируем кэш для потокобезопасности:
+   ```
+   spin_lock(&cache_manager.lock);
+   ```
+
+2. Записываем все "грязные" блоки на диск и освобождаем память:
+   ```
+   CacheBlock *current = cache_manager.head;
+   while (current != NULL) {
+       if (current->dirty) {
+           write_block_to_disk(current);
+       }
+       CacheBlock *next = current->next;
+       raw_munmap(current, sizeof(CacheBlock));
+       current = next;
+   }
+   ```
+
+3. Сбрасываем параметры кэша:
+   ```
+   cache_manager.head = NULL;
+   cache_manager.tail = NULL;
+   cache_manager.block_count = 0;
+   ```
+
+4. Разблокируем кэш:
+   ```
+   spin_unlock(&cache_manager.lock);
+   ```
+
+5. Закрываем все открытые файлы и освобождаем память:
+   ```
+   for (int i = 0; i < 1024; i++) {
+       if (open_files[i] != NULL) {
+           FileInfo *info = open_files[i];
+           raw_close(info->fd);
+           raw_munmap(info, sizeof(FileInfo));
+           open_files[i] = NULL;
+       }
+   }
+   ```
 
 Теперь кратко об функциях блокировки кеша и разблокировки кеша.
 
