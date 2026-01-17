@@ -1,7 +1,7 @@
 # Базовая лабораторная работа 2
 
 # Задание
-операции чтения и записи на диск. Такой кэш позволяет избежать высоких задержек при повторном доступе к данным, так как операция будет выполнена с данными в RAM, а не на диске.
+Реализация блочного кэша в пространстве пользователя в виде динамической библиотеки. Операции чтения и записи на диск. Такой кэш позволяет избежать высоких задержек при повторном доступе к данным, так как операция будет выполнена с данными в RAM, а не на диске.
 
 В данной лабораторной работе необходимо реализовать блочный кэш в пространстве пользователя в виде динамической библиотеки. Политику вытеснения страниц и другие элементы задания необходимо получить у преподавателя.
 
@@ -32,7 +32,6 @@
 
 Запрещено использовать высокоуровневые абстракции над системными вызовами.
 
-
 # Выполнение работы
 
 Основным файлом для работы считается vtpc.c, в котором реализуется API для работы с файлами.
@@ -41,7 +40,7 @@
 
 # vtpc.c
 
-По сути мы сделали свою асбтракцию для системных вызовов. 
+По сути мы сделали свою абстракцию для системных вызовов.
 
 Начнем по порядку
 
@@ -79,7 +78,6 @@ typedef struct CacheBlock {
 
 
 
-
 Дальше мы создаем структуру для хранения информации о файле
 ```
 typedef struct FileInfo {
@@ -101,7 +99,7 @@ typedef struct CacheManager {
     volatile int lock;   // Спинлок для потокобезопасности
 } CacheManager;
 ```
-Это структура для управления кешем. Тут мы будем содержать и обновлять информацию о том, какой файл был недавно использованным, а какой - давно. Это нам необходимо для реализации LRU. LRU - это алгоритм вытиснения данных. При заполненном кеше мы вытесняем из него самые давно использованные данные.
+Это структура для управления кешем. Тут мы будем содержать и обновлять информацию о том, какой файл был недавно использованным, а какой - давно. Это нам необходимо для реализации LRU. LRU - это алгоритм вытеснения данных. При заполненном кеше мы вытесняем из него самые давно использованные данные.
 Для начала нам надо установить начальные значения для всех указталей и счетчиков.
 
 ```
@@ -663,66 +661,66 @@ return new_block;
 API функции
 ---
 
-int vtpc_open(const char *path) - открывает файл и возвращает дескриптор:
+`int vtpc_open(const char *path)` - открывает файл и возвращает дескриптор:
 
 Эта функция открывает файл и возвращает виртуальный дескриптор файла для использования с другими функциями API.
-```
+
 
 Процесс открытия файла:
 1. Проверяем, была ли инициализирована система кэширования:
-   ```
-   static int initialized = 0;
-   if (!initialized) {
-       raw_memset(&cache_manager, 0, sizeof(cache_manager));
-       raw_memset(open_files, 0, sizeof(open_files));
-       initialized = 1;
-   }
-   ```
+```
+static int initialized = 0;
+if (!initialized) {
+    raw_memset(&cache_manager, 0, sizeof(cache_manager));
+    raw_memset(open_files, 0, sizeof(open_files));
+    initialized = 1;
+}
+```
 
 2. Пытаемся открыть файл с правами чтения/записи, если не удалось - только для чтения:
-   ```
-   int sys_fd = raw_open(path, 2);  // O_RDWR
-   if (sys_fd < 0) {
-       sys_fd = raw_open(path, 0); // O_RDONLY
-       if (sys_fd < 0) return -1;
-   }
-   ```
+```
+int sys_fd = raw_open(path, 2);  // O_RDWR
+if (sys_fd < 0) {
+    sys_fd = raw_open(path, 0); // O_RDONLY
+    if (sys_fd < 0) return -1;
+}
+```
 
 3. Получаем размер файла:
-   ```
-   off_t size = raw_lseek(sys_fd, 0, SEEK_END);
-   if (size < 0 || raw_lseek(sys_fd, 0, SEEK_SET) < 0) {
-       raw_close(sys_fd);
-       return -1;
-   }
-   ```
+```
+off_t size = raw_lseek(sys_fd, 0, SEEK_END);
+if (size < 0 || raw_lseek(sys_fd, 0, SEEK_SET) < 0) {
+    raw_close(sys_fd);
+    return -1;
+}
+```
 
 4. Ищем свободный слот для FileInfo:
-   ```
-   int vtpc_fd = -1;
-   for (int i = 0; i < 1024; i++) {
-       if (!open_files[i]) {
-           vtpc_fd = i;
-           break;
-       }
-   }
-   ```
+```
+int vtpc_fd = -1;
+for (int i = 0; i < 1024; i++) {
+    if (!open_files[i]) {
+        vtpc_fd = i;
+        break;
+    }
+}
+```
 
 5. Выделяем память для FileInfo и инициализируем его:
-   ```
-   FileInfo *info = raw_mmap(sizeof(FileInfo));
-   if (!info) {
-       raw_close(sys_fd);
-       return -1;
-   }
-   
-   info->fd = sys_fd;
-   info->file_size = size;
-   info->position = 0;
-   
-   open_files[vtpc_fd] = info;
-   return vtpc_fd;
-   ```
+```
+FileInfo *info = raw_mmap(sizeof(FileInfo));
+if (!info) {
+    raw_close(sys_fd);
+    return -1;
+}
+
+info->fd = sys_fd;
+info->file_size = size;
+info->position = 0;
+
+open_files[vtpc_fd] = info;
+return vtpc_fd;
+```
 
 int vtpc_close(int fd) - закрывает файл по дескриптору:
 
@@ -782,61 +780,61 @@ int vtpc_close(int fd) - закрывает файл по дескриптору
    open_files[fd] = 0;
    ```
 
-ssize_t vtpc_read(int fd, void *buf, size_t count) - читает данные из файла:
+`ssize_t vtpc_read(int fd, void *buf, size_t count)` - читает данные из файла:
 
 Эта функция читает указанное количество байт из файла в буфер.
-```
+
 Процесс чтения данных:
 1. Проверяем корректность параметров:
-   ```
-   if (fd < 0 || fd >= 1024 || !open_files[fd] || !buf) return -1;
-   ```
+```
+if (fd < 0 || fd >= 1024 || !open_files[fd] || !buf) return -1;
+```
 
 2. Определяем, сколько байт нужно прочитать:
-   ```
-   FileInfo *info = open_files[fd];
-   if (info->position >= info->file_size) return 0;
-   
-   size_t to_read = count;
-   if (info->position + (off_t)to_read > info->file_size) {
-       to_read = info->file_size - info->position;
-   }
-   ```
+```
+FileInfo *info = open_files[fd];
+if (info->position >= info->file_size) return 0;
+
+size_t to_read = count;
+if (info->position + (off_t)to_read > info->file_size) {
+    to_read = info->file_size - info->position;
+}
+```
 
 3. Читаем данные блоками:
-   ```
-   size_t total = 0;
-   char *buffer = (char*)buf;
-   
-   while (total < to_read) {
-       off_t pos = info->position + (off_t)total;
-       off_t block_num = get_block_number(pos);
-       off_t offset = get_block_offset(pos);
-       
-       size_t in_block = BLOCK_SIZE - offset;
-       size_t needed = to_read - total;
-       size_t copy = (in_block < needed) ? in_block : needed;
-       
-       // Ищем блок в кэше
-       CacheBlock *block = find_block_in_cache(fd, block_num);
-       
-       if (!block) {
-           block = allocate_new_block(fd, block_num);
-           if (!block) {
-               info->position += (off_t)total;
-               return total;
-           }
-       }
-       
-       raw_memcpy(buffer + total, block->data + offset, copy);
-       total += copy;
-   }
-   ```
+```
+size_t total = 0;
+char *buffer = (char*)buf;
+
+while (total < to_read) {
+    off_t pos = info->position + (off_t)total;
+    off_t block_num = get_block_number(pos);
+    off_t offset = get_block_offset(pos);
+    
+    size_t in_block = BLOCK_SIZE - offset;
+    size_t needed = to_read - total;
+    size_t copy = (in_block < needed) ? in_block : needed;
+    
+    // Ищем блок в кэше
+    CacheBlock *block = find_block_in_cache(fd, block_num);
+    
+    if (!block) {
+        block = allocate_new_block(fd, block_num);
+        if (!block) {
+            info->position += (off_t)total;
+            return total;
+        }
+    }
+    
+    raw_memcpy(buffer + total, block->data + offset, copy);
+    total += copy;
+}
+```
 
 4. Обновляем позицию в файле:
-   ```
-   info->position += (off_t)total;
-   return total;
+```
+info->position += (off_t)total;
+return total;
    ```
 
 ssize_t vtpc_write(int fd, const void *buf, size_t count) - записывает данные в файл:
@@ -915,81 +913,216 @@ off_t vtpc_lseek(int fd, off_t offset, int whence) - перемещает ука
 
 Процесс перемещения указателя:
 1. Проверяем корректность дескриптора:
-   ```
-   if (fd < 0 || fd >= 1024 || !open_files[fd]) return -1;
-   ```
+```
+if (fd < 0 || fd >= 1024 || !open_files[fd]) return -1;
+```
 
 2. Вычисляем новую позицию в зависимости от whence:
-   ```
-   FileInfo *info = open_files[fd];
-   off_t new_position;
-   
-   switch (whence) {
-       case SEEK_SET:
-           new_position = offset;
-           break;
-           
-       case SEEK_CUR:
-           new_position = info->position + offset;
-           break;
-           
-       case SEEK_END:
-           new_position = info->file_size + offset;
-           break;
-           
-       default:
-           return -1;
-   }
-   ```
+```
+FileInfo *info = open_files[fd];
+off_t new_position;
+
+switch (whence) {
+    case SEEK_SET:
+        new_position = offset;
+        break;
+        
+    case SEEK_CUR:
+        new_position = info->position + offset;
+        break;
+        
+    case SEEK_END:
+        new_position = info->file_size + offset;
+        break;
+        
+    default:
+        return -1;
+}
+```
 
 3. Проверяем, что позиция не отрицательна:
-   ```
-   if (new_position < 0) {
-       return -1;
-   }
-   ```
+```
+if (new_position < 0) {
+    return -1;
+}
+```
 
 4. Устанавливаем новую позицию:
-   ```
-   info->position = new_position;
-   return new_position;
-   ```
+```
+info->position = new_position;
+return new_position;
+```
 
 int vtpc_fsync(int fd) - синхронизирует данные файла с диском:
 
 Эта функция записывает все "грязные" блоки файла на диск и вызывает системный fsync.
-```
+
 Процесс синхронизации:
 1. Проверяем корректность дескриптора:
-   ```
-   if (fd < 0 || fd >= 1024 || !open_files[fd]) return -1;
-   ```
+```
+if (fd < 0 || fd >= 1024 || !open_files[fd]) return -1;
+```
 
 2. Блокируем кэш:
-   ```
-   spin_lock(&cache_manager.lock);
-   ```
+```
+spin_lock(&cache_manager.lock);
+```
 
 3. Записываем все "грязные" блоки этого файла на диск:
-   ```
-   CacheBlock *current = cache_manager.head;
-   while (current != NULL) {
-       if (current->fd == fd && current->dirty) {
-           write_block_to_disk(current);
-       }
-       current = current->next;
-   }
-   ```
+```
+CacheBlock *current = cache_manager.head;
+while (current != NULL) {
+    if (current->fd == fd && current->dirty) {
+        write_block_to_disk(current);
+    }
+    current = current->next;
+}
+```
 
 4. Разблокируем кэш:
-   ```
-   spin_unlock(&cache_manager.lock);
-   ```
+```
+spin_unlock(&cache_manager.lock);
+```
 
 5. Вызываем системный fsync:
-   ```
-   FileInfo *info = open_files[fd];
-   int result = raw_fsync(info->fd);
-   
-   return result;
-   ```
+```
+FileInfo *info = open_files[fd];
+int result = raw_fsync(info->fd);
+
+return result;
+```
+
+# Новые функции в библиотеке VTPC
+
+## Функции для работы с прямым доступом к диску
+
+### vtpc_open с флагами
+Функция `int vtpc_open(const char *path, int flags)` открывает файл с дополнительными флагами:
+- `VTPC_O_RDONLY` - открытие только для чтения
+- `VTPC_O_WRONLY` - открытие только для записи
+- `VTPC_O_RDWR` - открытие для чтения и записи
+- `VTPC_O_DIRECT` - прямой доступ к диску (обход кэша ОС)
+- `VTPC_O_SYNC` - синхронная запись
+
+Прямой доступ к диску позволяет обходить кэш операционной системы, что может быть полезно для специфических задач, где требуется гарантированная запись данных на диск без использования промежуточного кэширования.
+
+### vtpc_read_aligned и vtpc_write_aligned
+Функции `ssize_t vtpc_read_aligned(int fd, void *aligned_buf, size_t count)` и `ssize_t vtpc_write_aligned(int fd, const void *aligned_buf, size_t count)` работают с выровненными буферами памяти для прямого доступа к диску.
+
+Выровненные буферы - это буферы памяти, адрес которых кратен определенному значению (в нашем случае 512 байт). Это требование для работы с прямым доступом к диску.
+
+### vtpc_read_direct и vtpc_write_direct
+Функции `ssize_t vtpc_read_direct(int fd, void *aligned_buf, size_t count)` и `ssize_t vtpc_write_direct(int fd, const void *aligned_buf, size_t count)` обеспечивают принудительное чтение/запись напрямую с диска, обходя кэш, даже если файл открыт без флага O_DIRECT.
+
+### vtpc_alloc_aligned_buffer и vtpc_free_aligned_buffer
+Функции `void* vtpc_alloc_aligned_buffer(size_t size)` и `void vtpc_free_aligned_buffer(void *buffer)` позволяют выделять и освобождать выровненную память для работы с прямым доступом к диску.
+
+## Как работает прямой доступ к диску
+
+Прямой доступ к диску (O_DIRECT) позволяет обходить кэш операционной системы при чтении и записи данных. Это может быть полезно в следующих случаях:
+
+1. **Гарантированная запись данных** - данные сразу записываются на диск, минуя кэш операционной системы.
+2. **Специфические требования к производительности** - в некоторых случаях прямой доступ может быть быстрее, особенно при больших объемах данных.
+3. **Тестирование производительности диска** - позволяет измерить реальную производительность диска без влияния кэша.
+
+Однако, прямой доступ имеет и недостатки:
+1. **Требования к выравниванию** - буферы памяти и размеры операций должны быть выровнены по определенным границам.
+2. **Потенциально меньшая производительность** - кэш операционной системы часто улучшает производительность за счет уменьшения количества операций ввода-вывода.
+
+## Функции мониторинга производительности
+
+### vtpc_get_cache_size и vtpc_get_dirty_count
+Функции `size_t vtpc_get_cache_size(void)` и `size_t vtpc_get_dirty_count(void)` позволяют получить информацию о текущем состоянии кэша:
+- `vtpc_get_cache_size()` возвращает количество блоков в кэше
+- `vtpc_get_dirty_count()` возвращает количество "грязных" блоков (требующих записи на диск)
+
+### vtpc_print_cache_stats
+Функция `void vtpc_print_cache_stats(void)` выводит статистику кэша на экран.
+
+## Функция очистки ресурсов
+
+### vtpc_cleanup
+Функция `void vtpc_cleanup(void)` записывает все "грязные" блоки на диск и освобождает все ресурсы, связанные с файловой системой. Эта функция должна вызываться при завершении работы с библиотекой.
+
+# Сборка проекта
+
+Для сборки проекта используется Makefile со следующими целями:
+
+- `make all` - сборка всех компонентов
+- `make libvtpc.so` - сборка динамической библиотеки VTPC
+- `make memory_loader_vtpc` - сборка тестовой программы MemoryLoader
+- `make test` - запуск тестов
+- `make clean` - очистка проекта
+
+# Использование библиотеки
+
+Для использования библиотеки в своих программах необходимо:
+1. Подключить заголовочный файл `vtpc.h`
+2. Скомпилировать программу с использованием библиотеки libvtpc.so
+3. При запуске программы убедиться, что библиотека доступна в системе
+
+Пример использования:
+```c
+#include "vtpc.h"
+
+int main() {
+    // Открытие файла с прямым доступом
+    int fd = vtpc_open("test.txt", VTPC_O_RDWR | VTPC_O_DIRECT);
+    
+    // Выделение выровненного буфера
+    char* buffer = vtpc_alloc_aligned_buffer(4096);
+    
+    // Чтение данных
+    vtpc_read_direct(fd, buffer, 4096);
+    
+    // Запись данных
+    vtpc_write_direct(fd, buffer, 4096);
+    
+    // Закрытие файла
+    vtpc_close(fd);
+    
+    // Освобождение буфера
+    vtpc_free_aligned_buffer(buffer);
+    
+    // Очистка ресурсов
+    vtpc_cleanup();
+    
+    return 0;
+}
+```
+# Анализ
+
+Для анализа я взял программу из БЛР1. Сейчас это `MemoryLoader_vtpc.c` . В ней реалилваны две функции запуска: 
+- `randomReadTest_vtpc` -это запуск нагрузки с использование нашего кеша
+- `randomReadTest_system` - это запуск с систмеными вызовами, но в обход кеша. 
+
+Мы должны сравнить время работы. 
+
+### Гипотиза
+
+Вызов через системные операци идет без участие кеша. Учитывая, что файл, который мы считывая, очень большой, то операция чтения и записи на диск  будет очень не выгодной. 
+
+Когда мы читаем через vtpc - мы читаем сохраняем файлы в наш созданные кеш, где идет политика вытиснения LRU. И не смотря на то, что мы читаем рандомные позиции, то всегда есть шанс, что программа попадает в ту же страницу, что уже в кеше. В таком случае программа не загружает из диска, а грузит уже из кеша. Что ускоряет время чтения и записи
+
+То есть главная гипотиза:
+```
+Программы с vtpc будет работать быстрее, чем с системными вызовами.
+```
+
+### Результат
+
+```
+=== РЕЗУЛЬТАТЫ СРАВНЕНИЯ ===
+VTPC Cache:
+  Время выполнения: 3367 тактов (0.003 сек)
+  Загрузка CPU: user=2.6%, system=0.8%, wait=0.1%
+  Переключения контекста: 14875
+  Процессов: 0
+
+System Calls (O_DIRECT):
+  Время выполнения: 494021 тактов (0.494 сек)
+  Загрузка CPU: user=2.6%, system=0.8%, wait=0.1%
+  Переключения контекста: 72818
+  Процессов: 0
+```
+При всех запусках показатель времени работы с системные файлами меньше, чем вермени работы с vtpc

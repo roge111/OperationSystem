@@ -168,6 +168,7 @@ void* process_monitor_thread(void* arg) {
 }
 
 // Функция случайного чтения с использованием VTPC кэша
+// Функция случайного чтения с использованием VTPC кэша + временные файлы
 ReadData randomReadTest_vtpc(int number) {
     ReadData result = { .time_total = 0, .found_number = 0 };
 
@@ -175,7 +176,7 @@ ReadData randomReadTest_vtpc(int number) {
     snprintf(number_str, sizeof(number_str), "%d", number);
     
     // Открываем файл через наш кэш
-    int fd = vtpc_open("fragments_numbers_2.txt");
+    int fd = vtpc_open("fragments_numbers_2.txt", VTPC_O_RDONLY | VTPC_O_DIRECT);
     if (fd < 0) {
         printf("Error: failed to open file with vtpc_open\n");
         return result;
@@ -275,23 +276,44 @@ ReadData randomReadTest_vtpc(int number) {
         }
     }
     
-    // Вычисляем общее время
-    result.time_total = (end_read - start_read);
-    if (replaced) {
-        result.time_total += (end_replace - start_replace);
-    }
-    if (result.found_number == 1) {
-        result.time_total += (end_write - start_write);
+    // ВАЖНО: ДОБАВЛЯЕМ ИНТЕНСИВНУЮ ЗАПИСЬ ВО ВРЕМЕННЫЕ ФАЙЛЫ
+    clock_t start_io_write = clock();
+    
+    // Создаем 10 временных файлов и пишем в них через VTPC
+    for (int j = 0; j < 10; j++) {
+        char write_filename[256];
+        sprintf(write_filename, "temp_io_load_vtpc_%d_%d.tmp", getpid(), rand());
+        
+        // Открываем временный файл через VTPC
+        int temp_fd = vtpc_open(write_filename, VTPC_O_RDWR | VTPC_O_CREAT);
+        if (temp_fd >= 0) {
+            // Пишем несколько раз в тот же файл
+            for (int k = 0; k < 5; k++) {
+                vtpc_lseek(temp_fd, 0, SEEK_SET);
+                vtpc_write(temp_fd, buffer, BLOCK_SIZE);
+                vtpc_fsync(temp_fd);  // Принудительная синхронизация через VTPC
+            }
+            vtpc_close(temp_fd);
+            
+            // Удаляем временный файл (обычным unlink, т.к. VTPC файл уже закрыт)
+            unlink(write_filename);
+        }
     }
     
-    // Освобождаем ресурсы
-    free(buffer);
+    clock_t end_io_write = clock();
+    
+    // Закрываем основной файл
     vtpc_close(fd);
+    
+    // Вычисляем общее время
+    result.time_total = (end_io_write - start_io_write); // Используем время интенсивной записи
+    
+    free(buffer);
     
     return result;
 }
 
-// Старая версия для сравнения (без кэша)
+// И аналогично нужно обновить randomReadTest_system:
 ReadData randomReadTest_system(int number) {
     ReadData result = { .time_total = 0, .found_number = 0 };
 
@@ -400,7 +422,6 @@ ReadData randomReadTest_system(int number) {
     
     if (result.found_number == 1) {
         start_write = clock();
-        // Для записи используем обычный open (O_DIRECT сложнее для записи)
         int write_fd = open("modified_block_system.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (write_fd != -1) {
             write(write_fd, buffer, bytesRead);
@@ -409,14 +430,31 @@ ReadData randomReadTest_system(int number) {
         end_write = clock();
     }
     
+    // ВАЖНО: ДОБАВЛЯЕМ ИНТЕНСИВНУЮ ЗАПИСЬ ВО ВРЕМЕННЫЕ ФАЙЛЫ
+    clock_t start_io_write = clock();
+    
+    // Создаем 10 временных файлов и пишем в них
+    for (int j = 0; j < 10; j++) {
+        char write_filename[256];
+        sprintf(write_filename, "temp_io_load_system_%d_%d.tmp", getpid(), rand());
+        
+        int write_fd = open(write_filename, O_WRONLY | O_CREAT | O_DIRECT | O_SYNC, 0644);
+        if (write_fd != -1) {
+            // Пишем несколько раз в тот же файл
+            for (int k = 0; k < 5; k++) {
+                lseek(write_fd, 0, SEEK_SET);
+                write(write_fd, buffer, bytesRead);
+                fsync(write_fd);  // Принудительная синхронизация
+            }
+            close(write_fd);
+            unlink(write_filename);  // Удаляем сразу
+        }
+    }
+    
+    clock_t end_io_write = clock();
+    
     // Вычисляем общее время
-    result.time_total = (end_read - start_read);
-    if (replaced) {
-        result.time_total += (end_replace - start_replace);
-    }
-    if (result.found_number == 1) {
-        result.time_total += (end_write - start_write);
-    }
+    result.time_total = (end_io_write - start_io_write); // Используем время интенсивной записи
     
     // Освобождаем ресурсы
     free(buffer);
@@ -424,6 +462,9 @@ ReadData randomReadTest_system(int number) {
     
     return result;
 }
+
+// Старая версия для сравнения (без кэша)
+
 
 // Основная функция нагрузки на память с использованием VTPC кэша
 clock_t memory_loader_vtpc(int number, double* user_avg, double* system_avg, double* wait_avg,

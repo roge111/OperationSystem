@@ -1,3 +1,20 @@
+/**
+ * @file vtpc.c
+ * @brief Реализация виртуальной файловой системы с прямым доступом к диску
+ *
+ * Этот файл содержит реализацию виртуальной файловой системы, которая
+ * предоставляет функции для работы с файлами с возможностью прямого
+ * доступа к диску (обход кэша операционной системы).
+ *
+ * Основные возможности:
+ * - Открытие/закрытие файлов
+ * - Чтение/запись данных
+ * - Позиционирование в файле
+ * - Синхронизация данных с диском
+ * - Прямой доступ к диску (обход кэша ОС)
+ * - Кэширование блоков данных
+ */
+
 // vtpc_raw.c - полный код БЕЗ libc оберток
 #include "vtpc.h"
 #include <linux/fcntl.h>
@@ -5,8 +22,21 @@
 #include <stdatomic.h>
 #include <errno.h>
 #include <sys/mman.h>
+#include <stdint.h>  // Добавлено для uintptr_t
+#include <time.h>    // Для struct timespec
 
-// Определяем недостающие константы вручную, если они не определены
+
+#define VTPC_O_RDONLY     0x0001
+#define VTPC_O_WRONLY     0x0002  
+#define VTPC_O_RDWR       0x0004
+#define VTPC_O_DIRECT     0x0010  // Прямой доступ к диску (O_DIRECT)
+#define VTPC_O_SYNC       0x0020  // Синхронная запись
+
+// Определяем O_DIRECT для прямого доступа к диску
+#ifndef O_DIRECT
+#define O_DIRECT 00040000 /* прямой доступ к диску */
+#endif
+
 #ifndef PROT_READ
 #define PROT_READ   0x1
 #endif
@@ -23,6 +53,10 @@
 #define MAP_ANONYMOUS 0x20
 #endif
 
+#ifndef MAP_POPULATE
+#define MAP_POPULATE 0x8000
+#endif
+
 #ifndef SEEK_SET
 #define SEEK_SET 0
 #endif
@@ -35,7 +69,6 @@
 #define SEEK_END 2
 #endif
 
-// CLOCK_REALTIME определен в <time.h>, но если его нет, определим вручную
 #ifndef CLOCK_REALTIME
 #define CLOCK_REALTIME 0
 #endif
@@ -77,60 +110,217 @@
 #define SYS_clock_gettime 228
 #endif
 
+#ifndef SYS_fallocate
+#define SYS_fallocate 285
+#endif
+
 // Размеры
 #define BLOCK_SIZE 4096
+#define DIRECT_ALIGNMENT 512  // Выравнивание для прямого доступа
 #define MAX_CACHE_BLOCKS 1024
+
+// ========== ПРОТОТИПЫ ФУНКЦИЙ ==========
+
+ssize_t vtpc_read_aligned(int fd, void *aligned_buf, size_t count);
+ssize_t vtpc_write_aligned(int fd, const void *aligned_buf, size_t count);
 
 // ========== СИСТЕМНЫЕ ВЫЗОВЫ НАПРЯМУЮ ==========
 
-// Объявляем syscall, чтобы избежать предупреждения
+/**
+ * @brief Системный вызов ядра Linux
+ *
+ * Выполняет системный вызов с указанным номером и аргументами.
+ *
+ * @param number Номер системного вызова
+ * @param ... Аргументы системного вызова (зависят от конкретного вызова)
+ * @return Результат системного вызова (зависит от конкретного вызова)
+ */
 long syscall(long number, ...);
 
-static inline int raw_open(const char *path, int flags) {
-    return syscall(SYS_open, path, flags, 0666);
+/**
+ * @brief Открытие файла через системный вызов
+ *
+ * Открывает файл по указанному пути с заданными флагами и правами доступа.
+ *
+ * @param path Путь к файлу
+ * @param flags Флаги открытия файла (O_RDONLY, O_WRONLY, O_RDWR и др.)
+ * @param mode Права доступа к файлу (если создается новый)
+ * @return Дескриптор файла или -1 в случае ошибки
+ */
+static inline int raw_open(const char *path, int flags, int mode) {
+    return syscall(SYS_open, path, flags, mode);
 }
 
+/**
+ * @brief Закрытие файла через системный вызов
+ *
+ * Закрывает файл по указанному дескриптору.
+ *
+ * @param fd Дескриптор файла
+ * @return 0 в случае успеха, -1 в случае ошибки
+ */
 static inline int raw_close(int fd) {
     return syscall(SYS_close, fd);
 }
 
+/**
+ * @brief Чтение данных из файла через системный вызов
+ *
+ * Читает указанное количество байт из файла в буфер.
+ *
+ * @param fd Дескриптор файла
+ * @param buf Буфер для чтения данных
+ * @param count Количество байт для чтения
+ * @return Количество прочитанных байт или -1 в случае ошибки
+ */
 static inline ssize_t raw_read(int fd, void *buf, size_t count) {
     return syscall(SYS_read, fd, buf, count);
 }
 
+/**
+ * @brief Запись данных в файл через системный вызов
+ *
+ * Записывает указанное количество байт из буфера в файл.
+ *
+ * @param fd Дескриптор файла
+ * @param buf Буфер с данными для записи
+ * @param count Количество байт для записи
+ * @return Количество записанных байт или -1 в случае ошибки
+ */
 static inline ssize_t raw_write(int fd, const void *buf, size_t count) {
     return syscall(SYS_write, fd, buf, count);
 }
 
+/**
+ * @brief Позиционирование в файле через системный вызов
+ *
+ * Устанавливает позицию в файле согласно указанному смещению и режиму.
+ *
+ * @param fd Дескриптор файла
+ * @param offset Смещение относительно точки отсчета
+ * @param whence Точка отсчета (SEEK_SET, SEEK_CUR, SEEK_END)
+ * @return Новая позиция в файле или -1 в случае ошибки
+ */
 static inline off_t raw_lseek(int fd, off_t offset, int whence) {
     return syscall(SYS_lseek, fd, offset, whence);
 }
 
+/**
+ * @brief Синхронизация данных файла с диском через системный вызов
+ *
+ * Принудительно записывает все буферизованные данные файла на диск.
+ *
+ * @param fd Дескриптор файла
+ * @return 0 в случае успеха, -1 в случае ошибки
+ */
 static inline int raw_fsync(int fd) {
     return syscall(SYS_fsync, fd);
 }
 
+/**
+ * @brief Выделение памяти через системный вызов mmap
+ *
+ * Выделяет блок памяти указанного размера с помощью системного вызова mmap.
+ *
+ * @param size Размер выделяемой памяти
+ * @return Указатель на выделенную память или NULL в случае ошибки
+ */
 static inline void* raw_mmap(size_t size) {
-    void* result = (void*)syscall(SYS_mmap, 
-                         NULL, size, 
+    // Для прямого доступа выравниваем память по границе 512 байт
+    void* result = (void*)syscall(SYS_mmap,
+                         NULL, size + DIRECT_ALIGNMENT - 1,
                          PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS, 
+                         MAP_PRIVATE | MAP_ANONYMOUS,
                          -1, 0);
     return result;
 }
 
-static inline int raw_munmap(void *addr, size_t size) {
-    return syscall(SYS_munmap, addr, size);
+/**
+ * @brief Выделение выровненной памяти через системный вызов mmap
+ *
+ * Выделяет блок памяти указанного размера с выравниванием по границе DIRECT_ALIGNMENT байт.
+ *
+ * @param size Размер выделяемой памяти
+ * @return Указатель на выделенную выровненную память или NULL в случае ошибки
+ */
+static inline void* raw_mmap_aligned(size_t size) {
+    // Создаем выровненную память для прямого доступа
+    size_t total_size = size + DIRECT_ALIGNMENT - 1;
+    void* ptr = (void*)syscall(SYS_mmap,
+                         NULL, total_size,
+                         PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS,
+                         -1, 0);
+    
+    if ((long)ptr < 0 && (long)ptr > -4096) {
+        return NULL;
+    }
+    
+    // Выравниваем указатель по границе 512 байт
+    uintptr_t addr = (uintptr_t)ptr;
+    uintptr_t aligned_addr = (addr + DIRECT_ALIGNMENT - 1) & ~(DIRECT_ALIGNMENT - 1);
+    
+    return (void*)aligned_addr;
 }
 
+/**
+ * @brief Освобождение памяти через системный вызов munmap
+ *
+ * Освобождает блок памяти, выделенный через mmap.
+ *
+ * @param addr Указатель на освобождаемую память
+ * @param size Размер освобождаемой памяти
+ * @return 0 в случае успеха, -1 в случае ошибки
+ */
+static inline int raw_munmap(void *addr, size_t size) {
+    // Для выровненной памяти нужно освобождать исходный указатель
+    uintptr_t orig_addr = (uintptr_t)addr;
+    if (orig_addr & (DIRECT_ALIGNMENT - 1)) {
+        orig_addr = orig_addr & ~(DIRECT_ALIGNMENT - 1);
+    }
+    size_t total_size = size + DIRECT_ALIGNMENT - 1;
+    return syscall(SYS_munmap, (void*)orig_addr, total_size);
+}
+
+/**
+ * @brief Получение текущего времени через системный вызов
+ *
+ * Получает текущее время системы в секундах.
+ *
+ * @return Текущее время в секундах
+ */
 static inline time_t raw_time(void) {
     struct timespec ts;
     syscall(SYS_clock_gettime, CLOCK_REALTIME, &ts);
     return ts.tv_sec;
 }
 
-// ========== СВОИ РЕАЛИЗАЦИИ БАЗОВЫХ ФУНКЦИЙ ==========
+/**
+ * @brief Предварительное выделение места под файл через системный вызов
+ *
+ * Предварительно выделяет место на диске под файл.
+ *
+ * @param fd Дескриптор файла
+ * @param mode Режим выделения
+ * @param offset Смещение от начала файла
+ * @param len Длина выделяемого пространства
+ * @return 0 в случае успеха, -1 в случае ошибки
+ */
+static inline int raw_fallocate(int fd, int mode, off_t offset, off_t len) {
+    return syscall(SYS_fallocate, fd, mode, offset, len);
+}
 
+// ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+
+/**
+ * @brief Заполнение памяти заданным значением
+ *
+ * Заполняет блок памяти указанным значением.
+ *
+ * @param ptr Указатель на блок памяти
+ * @param value Значение для заполнения
+ * @param num Количество байт для заполнения
+ */
 static void raw_memset(void *ptr, int value, size_t num) {
     unsigned char *p = (unsigned char*)ptr;
     for (size_t i = 0; i < num; i++) {
@@ -138,6 +328,15 @@ static void raw_memset(void *ptr, int value, size_t num) {
     }
 }
 
+/**
+ * @brief Копирование памяти
+ *
+ * Копирует блок памяти из одного места в другое.
+ *
+ * @param dest Указатель на место назначения
+ * @param src Указатель на источник данных
+ * @param n Количество байт для копирования
+ */
 static void raw_memcpy(void *dest, const void *src, size_t n) {
     unsigned char *d = (unsigned char*)dest;
     const unsigned char *s = (const unsigned char*)src;
@@ -146,29 +345,71 @@ static void raw_memcpy(void *dest, const void *src, size_t n) {
     }
 }
 
+/**
+ * @brief Проверка выравнивания указателя
+ *
+ * Проверяет, выровнен ли указатель по заданной границе.
+ *
+ * @param ptr Проверяемый указатель
+ * @param alignment Граница выравнивания
+ * @return 1 если указатель выровнен, 0 если нет
+ */
+static inline int is_aligned(void *ptr, size_t alignment) {
+    uintptr_t addr = (uintptr_t)ptr;
+    return (addr & (alignment - 1)) == 0;
+}
+
 // ========== СТРУКТУРЫ ДАННЫХ ==========
 
+/**
+ * @brief Структура кэш-блока
+ *
+ * Представляет блок данных в кэше файловой системы.
+ */
 typedef struct CacheBlock {
-    int fd;
-    off_t block_number;
-    char data[BLOCK_SIZE];
-    int dirty;
-    time_t last_access;
-    struct CacheBlock *prev;
-    struct CacheBlock *next;
+    int fd;                    /**< Дескриптор файла */
+    off_t block_number;        /**< Номер блока */
+    char *data;               /**< Выровненная память для прямого доступа */
+    int dirty;                /**< Флаг "грязного" блока (требует записи на диск) */
+    time_t last_access;       /**< Время последнего доступа */
+    struct CacheBlock *prev;  /**< Указатель на предыдущий блок в списке */
+    struct CacheBlock *next;  /**< Указатель на следующий блок в списке */
+    void *original_ptr;      /**< Исходный указатель для освобождения памяти */
 } CacheBlock;
 
+/**
+ * @brief Структура информации о файле
+ *
+ * Содержит информацию о состоянии открытого файла.
+ */
 typedef struct FileInfo {
-    int fd;
-    off_t file_size;
-    off_t position;
+    int fd;              /**< Дескриптор файла */
+    off_t file_size;    /**< Размер файла */
+    off_t position;      /**< Текущая позиция в файле */
+    int use_direct_io;  /**< Флаг использования прямого доступа */
 } FileInfo;
 
+/**
+ * @brief Структура буфера прямого доступа
+ *
+ * Представляет буфер памяти, выровненный для прямого доступа к диску.
+ */
+typedef struct DirectIOBuffer {
+    char *buffer;        /**< Выровненный буфер */
+    void *original_ptr;  /**< Исходный указатель для освобождения */
+    size_t size;         /**< Размер буфера */
+} DirectIOBuffer;
+
+/**
+ * @brief Структура менеджера кэша
+ *
+ * Управляет кэшем блоков данных файловой системы.
+ */
 typedef struct CacheManager {
-    CacheBlock *head;
-    CacheBlock *tail;
-    int block_count;
-    volatile int lock;
+    CacheBlock *head;      /**< Указатель на голову списка кэш-блоков */
+    CacheBlock *tail;      /**< Указатель на хвост списка кэш-блоков */
+    int block_count;       /**< Количество блоков в кэше */
+    volatile int lock;     /**< Спинлок для синхронизации доступа к кэшу */
 } CacheManager;
 
 static FileInfo *open_files[1024];
@@ -176,6 +417,13 @@ static CacheManager cache_manager;
 
 // ========== СПИНЛОКИ ==========
 
+/**
+ * @brief Захват спинлока
+ *
+ * Выполняет захват спинлока с активным ожиданием.
+ *
+ * @param lock Указатель на спинлок
+ */
 static inline void spin_lock(volatile int *lock) {
     while (__sync_lock_test_and_set(lock, 1)) {
         #ifdef __x86_64__
@@ -184,37 +432,177 @@ static inline void spin_lock(volatile int *lock) {
     }
 }
 
+/**
+ * @brief Освобождение спинлока
+ *
+ * Освобождает захваченный спинлок.
+ *
+ * @param lock Указатель на спинлок
+ */
 static inline void spin_unlock(volatile int *lock) {
     __sync_lock_release(lock);
 }
 
-// ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+// ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ КЭША ==========
 
+/**
+ * @brief Получение номера блока по позиции в файле
+ *
+ * Вычисляет номер блока на основе позиции в файле.
+ *
+ * @param position Позиция в файле
+ * @return Номер блока
+ */
 static off_t get_block_number(off_t position) {
     return position / BLOCK_SIZE;
 }
 
+/**
+ * @brief Получение смещения внутри блока по позиции в файле
+ *
+ * Вычисляет смещение внутри блока на основе позиции в файле.
+ *
+ * @param position Позиция в файле
+ * @return Смещение внутри блока
+ */
 static off_t get_block_offset(off_t position) {
     return position % BLOCK_SIZE;
 }
 
-// ========== ОСНОВНЫЕ ФУНКЦИИ КЭША ==========
+// ========== ФУНКЦИИ ПРЯМОГО ДОСТУПА К ДИСКУ ==========
 
-static void read_block_from_disk(CacheBlock *block) {
+/**
+ * @brief Создание буфера прямого доступа
+ *
+ * Создает буфер памяти, выровненный для прямого доступа к диску.
+ *
+ * @param size Размер буфера
+ * @return Структура DirectIOBuffer с указателями на буфер и исходную память
+ */
+static DirectIOBuffer create_direct_io_buffer(size_t size) {
+    DirectIOBuffer buffer = {0};
+    
+    // Округляем размер до выровненного значения
+    size_t aligned_size = ((size + DIRECT_ALIGNMENT - 1) / DIRECT_ALIGNMENT) * DIRECT_ALIGNMENT;
+    
+    // Выделяем память с запасом для выравнивания
+    size_t total_size = aligned_size + DIRECT_ALIGNMENT - 1;
+    void *ptr = (void*)syscall(SYS_mmap,
+                         NULL, total_size,
+                         PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS,
+                         -1, 0);
+    
+    if ((long)ptr < 0 && (long)ptr > -4096) {
+        return buffer;
+    }
+    
+    // Выравниваем указатель
+    uintptr_t addr = (uintptr_t)ptr;
+    uintptr_t aligned_addr = (addr + DIRECT_ALIGNMENT - 1) & ~(DIRECT_ALIGNMENT - 1);
+    
+    buffer.buffer = (char*)aligned_addr;
+    buffer.original_ptr = ptr;
+    buffer.size = aligned_size;
+    
+    return buffer;
+}
+
+/**
+ * @brief Освобождение буфера прямого доступа
+ *
+ * Освобождает память, выделенную для буфера прямого доступа.
+ *
+ * @param buffer Указатель на структуру DirectIOBuffer
+ */
+static void free_direct_io_buffer(DirectIOBuffer *buffer) {
+    if (buffer->original_ptr) {
+        size_t total_size = buffer->size + DIRECT_ALIGNMENT - 1;
+        syscall(SYS_munmap, buffer->original_ptr, total_size);
+        buffer->buffer = NULL;
+        buffer->original_ptr = NULL;
+    }
+}
+
+/**
+ * @brief Прямое чтение с диска в обход кэша ОС
+ *
+ * Выполняет чтение данных из файла напрямую с диска, обходя кэш операционной системы.
+ *
+ * @param fd Дескриптор файла
+ * @param buf Буфер для чтения данных
+ * @param count Количество байт для чтения
+ * @param offset Смещение в файле
+ * @return Количество прочитанных байт или -1 в случае ошибки
+ */
+static ssize_t direct_disk_read(int fd, void *buf, size_t count, off_t offset) {
+    // Сохраняем текущую позицию
+    off_t current_pos = raw_lseek(fd, 0, SEEK_CUR);
+    if (current_pos < 0) return -1;
+    
+    // Перемещаемся к нужной позиции
+    if (raw_lseek(fd, offset, SEEK_SET) < 0) {
+        raw_lseek(fd, current_pos, SEEK_SET);
+        return -1;
+    }
+    
+    // Читаем данные напрямую с диска
+    ssize_t bytes_read = raw_read(fd, buf, count);
+    
+    // Восстанавливаем позицию
+    raw_lseek(fd, current_pos, SEEK_SET);
+    
+    return bytes_read;
+}
+
+/**
+ * @brief Прямая запись на диск в обход кэша ОС
+ *
+ * Выполняет запись данных в файл напрямую на диск, обходя кэш операционной системы.
+ *
+ * @param fd Дескриптор файла
+ * @param buf Буфер с данными для записи
+ * @param count Количество байт для записи
+ * @param offset Смещение в файле
+ * @return Количество записанных байт или -1 в случае ошибки
+ */
+static ssize_t direct_disk_write(int fd, const void *buf, size_t count, off_t offset) {
+    // Сохраняем текущую позицию
+    off_t current_pos = raw_lseek(fd, 0, SEEK_CUR);
+    if (current_pos < 0) return -1;
+    
+    // Перемещаемся к нужной позиции
+    if (raw_lseek(fd, offset, SEEK_SET) < 0) {
+        raw_lseek(fd, current_pos, SEEK_SET);
+        return -1;
+    }
+    
+    // Записываем данные напрямую на диск
+    ssize_t bytes_written = raw_write(fd, buf, count);
+    
+    // Восстанавливаем позицию
+    raw_lseek(fd, current_pos, SEEK_SET);
+    
+    return bytes_written;
+}
+
+// ========== ОСНОВНЫЕ ФУНКЦИИ КЭША С ПРЯМЫМ ДОСТУПОМ ==========
+
+/**
+ * @brief Чтение блока данных с диска через прямой доступ
+ *
+ * Выполняет чтение блока данных с диска в кэш-блок через прямой доступ.
+ *
+ * @param block Указатель на кэш-блок для чтения данных
+ */
+static void read_block_from_disk_direct(CacheBlock *block) {
     FileInfo *file_info = open_files[block->fd];
     if (!file_info) return;
     
     off_t pos = block->block_number * BLOCK_SIZE;
-    off_t old_pos = raw_lseek(file_info->fd, 0, SEEK_CUR);
     
-    if (old_pos < 0 || raw_lseek(file_info->fd, pos, SEEK_SET) < 0) {
-        if (old_pos >= 0) raw_lseek(file_info->fd, old_pos, SEEK_SET);
-        raw_memset(block->data, 0, BLOCK_SIZE);
-        return;
-    }
-    
-    ssize_t bytes = raw_read(file_info->fd, block->data, BLOCK_SIZE);
-    raw_lseek(file_info->fd, old_pos, SEEK_SET);
+    // Используем прямое чтение с диска
+    ssize_t bytes = direct_disk_read(file_info->fd, block->data, BLOCK_SIZE, pos);
     
     if (bytes < BLOCK_SIZE) {
         if (bytes > 0) {
@@ -228,37 +616,45 @@ static void read_block_from_disk(CacheBlock *block) {
     block->last_access = raw_time();
 }
 
-static void write_block_to_disk(CacheBlock *block) {
+/**
+ * @brief Запись блока данных на диск через прямой доступ
+ *
+ * Выполняет запись "грязного" кэш-блока на диск через прямой доступ.
+ *
+ * @param block Указатель на кэш-блок для записи
+ */
+static void write_block_to_disk_direct(CacheBlock *block) {
     FileInfo *file_info = open_files[block->fd];
     if (!file_info || !block->dirty) return;
     
     off_t pos = block->block_number * BLOCK_SIZE;
-    off_t old_pos = raw_lseek(file_info->fd, 0, SEEK_CUR);
     
-    if (old_pos < 0 || raw_lseek(file_info->fd, pos, SEEK_SET) < 0) {
-        if (old_pos >= 0) raw_lseek(file_info->fd, old_pos, SEEK_SET);
-        return;
-    }
-    
-    ssize_t written = raw_write(file_info->fd, block->data, BLOCK_SIZE);
-    raw_lseek(file_info->fd, old_pos, SEEK_SET);
+    // Используем прямую запись на диск
+    ssize_t written = direct_disk_write(file_info->fd, block->data, BLOCK_SIZE, pos);
     
     if (written == BLOCK_SIZE) {
         block->dirty = 0;
     }
 }
 
+/**
+ * @brief Поиск блока в кэше
+ *
+ * Ищет блок с указанным номером в кэше. Если блок найден, перемещает его в начало списка (LRU).
+ *
+ * @param fd Дескриптор файла
+ * @param block_number Номер блока
+ * @return Указатель на найденный блок или NULL, если блок не найден
+ */
 static CacheBlock* find_block_in_cache(int fd, off_t block_number) {
     CacheBlock *current = cache_manager.head;
     
     while (current != NULL) {
         if (current->fd == fd && current->block_number == block_number) {
-            // Обновляем время доступа
             current->last_access = raw_time();
             
             // Перемещаем в начало списка (LRU)
             if (current != cache_manager.head) {
-                // Вынимаем из текущей позиции
                 if (current->prev) {
                     current->prev->next = current->next;
                 }
@@ -266,12 +662,10 @@ static CacheBlock* find_block_in_cache(int fd, off_t block_number) {
                     current->next->prev = current->prev;
                 }
                 
-                // Обновляем хвост если нужно
                 if (current == cache_manager.tail) {
                     cache_manager.tail = current->prev;
                 }
                 
-                // Вставляем в начало
                 current->prev = NULL;
                 current->next = cache_manager.head;
                 
@@ -281,7 +675,6 @@ static CacheBlock* find_block_in_cache(int fd, off_t block_number) {
                 
                 cache_manager.head = current;
                 
-                // Если список был пуст
                 if (cache_manager.tail == NULL) {
                     cache_manager.tail = current;
                 }
@@ -295,6 +688,11 @@ static CacheBlock* find_block_in_cache(int fd, off_t block_number) {
     return NULL;
 }
 
+/**
+ * @brief Вытеснение наименее используемого блока из кэша
+ *
+ * Вытесняет блок из конца списка LRU. Если блок "грязный", записывает его на диск перед вытеснением.
+ */
 static void evict_lru_block(void) {
     if (cache_manager.tail == NULL) {
         return;
@@ -304,7 +702,20 @@ static void evict_lru_block(void) {
     
     // Если блок "грязный", записываем его на диск
     if (to_evict->dirty) {
-        write_block_to_disk(to_evict);
+        if (open_files[to_evict->fd] && open_files[to_evict->fd]->use_direct_io) {
+            write_block_to_disk_direct(to_evict);
+        } else {
+            // Для обычных файлов используем стандартную запись
+            FileInfo *file_info = open_files[to_evict->fd];
+            if (file_info) {
+                off_t pos = to_evict->block_number * BLOCK_SIZE;
+                off_t old_pos = raw_lseek(file_info->fd, 0, SEEK_CUR);
+                if (old_pos >= 0 && raw_lseek(file_info->fd, pos, SEEK_SET) >= 0) {
+                    raw_write(file_info->fd, to_evict->data, BLOCK_SIZE);
+                    raw_lseek(file_info->fd, old_pos, SEEK_SET);
+                }
+            }
+        }
     }
     
     // Удаляем блок из списка
@@ -318,34 +729,89 @@ static void evict_lru_block(void) {
         cache_manager.head = NULL;
     }
     
-    // Освобождаем память
+    // Освобождаем выровненную память
+    if (to_evict->original_ptr) {
+        raw_munmap(to_evict->original_ptr, BLOCK_SIZE + DIRECT_ALIGNMENT - 1);
+    }
+    
+    // Освобождаем структуру блока
     raw_munmap(to_evict, sizeof(CacheBlock));
     cache_manager.block_count--;
 }
 
+/**
+ * @brief Выделение нового блока в кэше
+ *
+ * Выделяет новый блок в кэше для указанного файла и номера блока. Если кэш переполнен, вытесняет LRU блок.
+ *
+ * @param fd Дескриптор файла
+ * @param block_number Номер блока
+ * @return Указатель на новый блок или NULL в случае ошибки
+ */
 static CacheBlock* allocate_new_block(int fd, off_t block_number) {
     spin_lock(&cache_manager.lock);
     
-    // Если кэш полон, вытесняем LRU блок
     if (cache_manager.block_count >= MAX_CACHE_BLOCKS) {
         evict_lru_block();
     }
     
-    // Создаем новый блок
+    // Выделяем память для структуры блока
     CacheBlock *new_block = raw_mmap(sizeof(CacheBlock));
     if (!new_block) {
         spin_unlock(&cache_manager.lock);
         return NULL;
     }
     
-    // Инициализируем блок
     raw_memset(new_block, 0, sizeof(CacheBlock));
     new_block->fd = fd;
     new_block->block_number = block_number;
     new_block->last_access = raw_time();
     
-    // Читаем данные с диска
-    read_block_from_disk(new_block);
+    // Выделяем выровненную память для данных блока
+    FileInfo *file_info = open_files[fd];
+    if (file_info && file_info->use_direct_io) {
+        // Для прямого доступа используем выровненную память
+        DirectIOBuffer buffer = create_direct_io_buffer(BLOCK_SIZE);
+        if (!buffer.buffer) {
+            raw_munmap(new_block, sizeof(CacheBlock));
+            spin_unlock(&cache_manager.lock);
+            return NULL;
+        }
+        new_block->data = buffer.buffer;
+        new_block->original_ptr = buffer.original_ptr;
+        
+        // Читаем данные напрямую с диска
+        read_block_from_disk_direct(new_block);
+    } else {
+        // Для обычных файлов используем стандартную память
+        new_block->data = raw_mmap(BLOCK_SIZE);
+        if (!new_block->data) {
+            raw_munmap(new_block, sizeof(CacheBlock));
+            spin_unlock(&cache_manager.lock);
+            return NULL;
+        }
+        new_block->original_ptr = new_block->data;
+        
+        // Читаем данные стандартным способом
+        off_t pos = block_number * BLOCK_SIZE;
+        FileInfo *info = open_files[fd];
+        if (info) {
+            off_t old_pos = raw_lseek(info->fd, 0, SEEK_CUR);
+            if (old_pos >= 0 && raw_lseek(info->fd, pos, SEEK_SET) >= 0) {
+                ssize_t bytes = raw_read(info->fd, new_block->data, BLOCK_SIZE);
+                raw_lseek(info->fd, old_pos, SEEK_SET);
+                
+                if (bytes < BLOCK_SIZE) {
+                    if (bytes > 0) {
+                        raw_memset(new_block->data + bytes, 0, BLOCK_SIZE - bytes);
+                    } else {
+                        raw_memset(new_block->data, 0, BLOCK_SIZE);
+                    }
+                }
+            }
+        }
+        new_block->dirty = 0;
+    }
     
     // Добавляем блок в начало списка
     new_block->next = cache_manager.head;
@@ -365,21 +831,56 @@ static CacheBlock* allocate_new_block(int fd, off_t block_number) {
     return new_block;
 }
 
-// ========== API ФУНКЦИИ ==========
+// ========== API ФУНКЦИИ С ПРЯМЫМ ДОСТУПОМ ==========
 
-int vtpc_open(const char *path) {
+
+/**
+ * @brief Открытие файла с флагами
+ *
+ * Открывает файл по указанному пути с заданными флагами.
+ *
+ * @param path Путь к файлу
+ * @param flags Флаги открытия файла (VTPC_O_RDONLY, VTPC_O_WRONLY, VTPC_O_RDWR, VTPC_O_DIRECT, VTPC_O_SYNC)
+ * @return Виртуальный дескриптор файла или -1 в случае ошибки
+ */
+int vtpc_open(const char *path, int flags) {
     static int initialized = 0;
     if (!initialized) {
-        raw_memset(&cache_manager, 0, sizeof(cache_manager));
-        raw_memset(open_files, 0, sizeof(open_files));
+        raw_memset(&cache_manager, 0, sizeof(cache_manager)); // обнуляем кеш
+        raw_memset(open_files, 0, sizeof(open_files)); // обнуляем массив файлов
         initialized = 1;
     }
     
-    // Пробуем открыть с O_RDWR (2)
-    int sys_fd = raw_open(path, 2);
+    int sys_flags = 0;
+    int use_direct_io = 0;
+    
+    // Преобразуем наши флаги в системные
+    if (flags & VTPC_O_RDWR) {
+        sys_flags = 2;  // O_RDWR
+    } else if (flags & VTPC_O_WRONLY) {
+        sys_flags = 1;  // O_WRONLY
+    } else {
+        sys_flags = 0;  // O_RDONLY
+    }
+    
+    // Добавляем флаг прямого доступа если требуется
+    if (flags & VTPC_O_DIRECT) {
+        sys_flags |= O_DIRECT;
+        use_direct_io = 1;
+    }
+    
+    if (flags & VTPC_O_SYNC) {
+        // O_SYNC для синхронной записи
+        sys_flags |= 0x1000;  // O_SYNC
+    }
+    
+    int sys_fd = raw_open(path, sys_flags, 0666); //0666 - права доступа по умолчанию
     if (sys_fd < 0) {
-        sys_fd = raw_open(path, 0); // Пробуем O_RDONLY (0)
+        // Если не удалось открыть с прямым доступом, пробуем без него
+        sys_flags &= ~O_DIRECT;
+        sys_fd = raw_open(path, sys_flags, 0666);
         if (sys_fd < 0) return -1;
+        use_direct_io = 0;
     }
     
     // Получаем размер файла
@@ -413,11 +914,20 @@ int vtpc_open(const char *path) {
     info->fd = sys_fd;
     info->file_size = size;
     info->position = 0;
+    info->use_direct_io = use_direct_io;
     
     open_files[vtpc_fd] = info;
     return vtpc_fd;
 }
 
+/**
+ * @brief Закрытие файла
+ *
+ * Закрывает файл по указанному виртуальному дескриптору. Записывает все "грязные" блоки на диск и освобождает ресурсы.
+ *
+ * @param fd Виртуальный дескриптор файла
+ * @return 0 в случае успеха, -1 в случае ошибки
+ */
 int vtpc_close(int fd) {
     if (fd < 0 || fd >= 1024 || !open_files[fd]) return -1;
     
@@ -427,7 +937,19 @@ int vtpc_close(int fd) {
     CacheBlock *curr = cache_manager.head;
     while (curr) {
         if (curr->fd == fd && curr->dirty) {
-            write_block_to_disk(curr);
+            FileInfo *file_info = open_files[fd];
+            if (file_info) {
+                if (file_info->use_direct_io) {
+                    write_block_to_disk_direct(curr);
+                } else {
+                    off_t pos = curr->block_number * BLOCK_SIZE;
+                    off_t old_pos = raw_lseek(file_info->fd, 0, SEEK_CUR);
+                    if (old_pos >= 0 && raw_lseek(file_info->fd, pos, SEEK_SET) >= 0) {
+                        raw_write(file_info->fd, curr->data, BLOCK_SIZE);
+                        raw_lseek(file_info->fd, old_pos, SEEK_SET);
+                    }
+                }
+            }
         }
         curr = curr->next;
     }
@@ -437,12 +959,17 @@ int vtpc_close(int fd) {
     while (curr) {
         CacheBlock *next = curr->next;
         if (curr->fd == fd) {
-            // Удаляем из списка
             if (curr->prev) curr->prev->next = curr->next;
             if (curr->next) curr->next->prev = curr->prev;
             if (curr == cache_manager.head) cache_manager.head = curr->next;
             if (curr == cache_manager.tail) cache_manager.tail = curr->prev;
             
+            // Освобождаем выровненную память данных
+            if (curr->original_ptr) {
+                raw_munmap(curr->original_ptr, BLOCK_SIZE + DIRECT_ALIGNMENT - 1);
+            }
+            
+            // Освобождаем структуру блока
             raw_munmap(curr, sizeof(CacheBlock));
             cache_manager.block_count--;
         }
@@ -460,54 +987,212 @@ int vtpc_close(int fd) {
     return 0;
 }
 
+/**
+ * @brief Чтение данных из файла
+ *
+ * Читает указанное количество байт из файла в буфер. Поддерживает прямой доступ к диску.
+ *
+ * @param fd Виртуальный дескриптор файла
+ * @param buf Буфер для чтения данных
+ * @param count Количество байт для чтения
+ * @return Количество прочитанных байт или -1 в случае ошибки
+ */
 ssize_t vtpc_read(int fd, void *buf, size_t count) {
     if (fd < 0 || fd >= 1024 || !open_files[fd] || !buf) return -1;
     
     FileInfo *info = open_files[fd];
     if (info->position >= info->file_size) return 0;
     
+    // Для прямого доступа нужен выровненный буфер
+    if (info->use_direct_io) {
+        // Проверяем выравнивание буфера
+        if (!is_aligned(buf, DIRECT_ALIGNMENT)) {
+            // Создаем временный выровненный буфер
+            DirectIOBuffer temp_buffer = create_direct_io_buffer(count);
+            if (!temp_buffer.buffer) return -1;
+            // Читаем в выровненный буфер
+            ssize_t result = vtpc_read_aligned(fd, temp_buffer.buffer, count);
+            // Копируем в пользовательский буфер
+            if (result > 0) {
+                raw_memcpy(buf, temp_buffer.buffer, result);
+            }
+            
+            free_direct_io_buffer(&temp_buffer);
+            return result;
+        }
+        
+        // Буфер выровнен, читаем напрямую
+        return vtpc_read_aligned(fd, buf, count);
+    }
+    
+    // // Стандартное чтение через кэш
+    // size_t to_read = count;
+    // if (info->position + (off_t)to_read > info->file_size) {
+    //     to_read = info->file_size - info->position;
+    // }
+    
+    // size_t total = 0;
+    // char *buffer = (char*)buf;
+    
+    // while (total < to_read) {
+    //     off_t pos = info->position + (off_t)total;
+    //     off_t block_num = get_block_number(pos);
+    //     off_t offset = get_block_offset(pos);
+        
+    //     size_t in_block = BLOCK_SIZE - offset;
+    //     size_t needed = to_read - total;
+    //     size_t copy = (in_block < needed) ? in_block : needed;
+        
+    //     CacheBlock *block = find_block_in_cache(fd, block_num);
+        
+    //     if (!block) {
+    //         block = allocate_new_block(fd, block_num);
+    //         if (!block) {
+    //             info->position += (off_t)total;
+    //             return total;
+    //         }
+    //     }
+        
+    //     raw_memcpy(buffer + total, block->data + offset, copy);
+    //     total += copy;
+    // }
+    
+    // info->position += (off_t)total;
+    // return total;
+}
+
+/**
+ * @brief Чтение данных из файла с выровненным буфером
+ *
+ * Читает указанное количество байт из файла в выровненный буфер. Используется для прямого доступа к диску.
+ *
+ * @param fd Виртуальный дескриптор файла
+ * @param aligned_buf Выровненный буфер для чтения данных
+ * @param count Количество байт для чтения
+ * @return Количество прочитанных байт или -1 в случае ошибки
+ */
+ssize_t vtpc_read_aligned(int fd, void *aligned_buf, size_t count) {
+    // 1. ПРОВЕРКА ПАРАМЕТРОВ
+    if (fd < 0 || fd >= 1024 || !open_files[fd] || !aligned_buf) 
+        return -1;
+    
+    // 2. ПРОВЕРКА ВЫРАВНИВАНИЯ БУФЕРА (512 байт)
+    if (!is_aligned(aligned_buf, DIRECT_ALIGNMENT)) 
+        return -1;
+    
+    FileInfo *info = open_files[fd];
+    
+    // 3. ПРОВЕРКА КОНЦА ФАЙЛА
+    if (info->position >= info->file_size) 
+        return 0;
+    
+    // 4. ОГРАНИЧЕНИЕ ЧТЕНИЯ ДО РАЗМЕРА ФАЙЛА
     size_t to_read = count;
     if (info->position + (off_t)to_read > info->file_size) {
         to_read = info->file_size - info->position;
     }
     
-    size_t total = 0;
-    char *buffer = (char*)buf;
+    // 5. ОКРУГЛЕНИЕ РАЗМЕРА ДЛЯ O_DIRECT (кратно 512)
+    size_t aligned_count = ((to_read + DIRECT_ALIGNMENT - 1) / DIRECT_ALIGNMENT) * DIRECT_ALIGNMENT;
     
-    while (total < to_read) {
-        off_t pos = info->position + (off_t)total;
-        off_t block_num = get_block_number(pos);
-        off_t offset = get_block_offset(pos);
+    // 6. ПРЯМОЕ ЧТЕНИЕ С ДИСКА (ОБХОД КЭША ОС)
+    ssize_t bytes_read = direct_disk_read(info->fd, aligned_buf, aligned_count, info->position);
+    
+    // 7. ОБРАБОТКА РЕЗУЛЬТАТА
+    if (bytes_read > 0) {
+        // Если прочитали больше, чем requested (из-за округления)
+        if ((size_t)bytes_read > to_read) {
+            bytes_read = to_read;
+        }
+        // ОБНОВЛЯЕМ ПОЗИЦИЮ В ФАЙЛЕ
+        info->position += bytes_read;
+    }
+    
+    return bytes_read;
+}
+
+/**
+ * @brief Запись данных в файл
+ *
+ * Записывает указанное количество байт из буфера в файл. Поддерживает прямой доступ к диску.
+ *
+ * @param fd Виртуальный дескриптор файла
+ * @param buf Буфер с данными для записи
+ * @param count Количество байт для записи
+ * @return Количество записанных байт или -1 в случае ошибки
+ */
+ssize_t vtpc_write(int fd, const void *buf, size_t count) {
+    // 1. ПРОВЕРКА ПАРАМЕТРОВ
+    if (fd < 0 || fd >= 1024 || !open_files[fd] || !buf) 
+        return -1;
+    
+    FileInfo *info = open_files[fd];
+    
+    // 2. ДЛЯ ПРЯМОГО ДОСТУПА (O_DIRECT) - ЕДИНСТВЕННЫЙ РЕЖИМ
+    
+    // Проверяем выравнивание буфера
+    if (!is_aligned((void*)buf, DIRECT_ALIGNMENT)) {
+        // Создаем временный выровненный буфер
+        DirectIOBuffer temp_buffer = create_direct_io_buffer(count);
+        if (!temp_buffer.buffer) return -1;
         
-        size_t in_block = BLOCK_SIZE - offset;
-        size_t needed = to_read - total;
-        size_t copy = (in_block < needed) ? in_block : needed;
+        // Копируем данные во временный буфер
+        raw_memcpy(temp_buffer.buffer, buf, count);
         
-        // Ищем блок в кэше
-        CacheBlock *block = find_block_in_cache(fd, block_num);
+        // Записываем через выровненный буфер
+        ssize_t result = vtpc_write_direct(fd, temp_buffer.buffer, count);
         
-        if (!block) {
-            block = allocate_new_block(fd, block_num);
-            if (!block) {
-                info->position += (off_t)total;
-                return total;
+        // Освобождаем временный буфер
+        free_direct_io_buffer(&temp_buffer);
+        return result;
+    }
+    
+    // 3. БУФЕР ВЫРОВНЕН - ЗАПИСЫВАЕМ НАПРЯМУЮ
+    return vtpc_write_direct(fd, buf, count);
+}
+
+/**
+ * @brief Запись данных в файл с выровненным буфером
+ *
+ * Записывает указанное количество байт из выровненного буфера в файл. Используется для прямого доступа к диску.
+ *
+ * @param fd Виртуальный дескриптор файла
+ * @param aligned_buf Выровненный буфер с данными для записи
+ * @param count Количество байт для записи
+ * @return Количество записанных байт или -1 в случае ошибки
+ */
+ssize_t vtpc_write_aligned(int fd, const void *aligned_buf, size_t count) {
+    if (fd < 0 || fd >= 1024 || !open_files[fd] || !aligned_buf) return -1;
+    if (!is_aligned((void*)aligned_buf, DIRECT_ALIGNMENT)) return -1;
+    
+    FileInfo *info = open_files[fd];
+    
+    // Для прямого доступа пишем напрямую на диск
+    if (info->use_direct_io) {
+        // Округляем размер до выровненного значения
+        size_t aligned_count = ((count + DIRECT_ALIGNMENT - 1) / DIRECT_ALIGNMENT) * DIRECT_ALIGNMENT;
+        
+        ssize_t bytes_written = direct_disk_write(info->fd, aligned_buf, aligned_count, info->position);
+        
+        if (bytes_written > 0) {
+            if ((size_t)bytes_written > count) {
+                bytes_written = count;
+            }
+            info->position += bytes_written;
+            
+            // Обновляем размер файла
+            off_t new_end_pos = info->position;
+            if (new_end_pos > info->file_size) {
+                info->file_size = new_end_pos;
             }
         }
         
-        raw_memcpy(buffer + total, block->data + offset, copy);
-        total += copy;
+        return bytes_written;
     }
     
-    info->position += (off_t)total;
-    return total;
-}
-
-ssize_t vtpc_write(int fd, const void *buf, size_t count) {
-    if (fd < 0 || fd >= 1024 || !open_files[fd] || !buf) return -1;
-    
-    FileInfo *info = open_files[fd];
+    // Для обычных файлов используем стандартную запись через кэш
     size_t total_bytes_written = 0;
-    const char *buffer = (const char*)buf;
+    const char *buffer = (const char*)aligned_buf;
     
     while (total_bytes_written < count) {
         off_t current_pos = info->position + (off_t)total_bytes_written;
@@ -518,10 +1203,8 @@ ssize_t vtpc_write(int fd, const void *buf, size_t count) {
         size_t bytes_needed = count - total_bytes_written;
         size_t bytes_to_copy = (bytes_in_block < bytes_needed) ? bytes_in_block : bytes_needed;
         
-        // Ищем блок в кэше
         CacheBlock *block = find_block_in_cache(fd, block_num);
         
-        // Если блока нет в кэше, создаем новый
         if (!block) {
             block = allocate_new_block(fd, block_num);
             if (!block) {
@@ -530,18 +1213,14 @@ ssize_t vtpc_write(int fd, const void *buf, size_t count) {
             }
         }
         
-        // Копируем данные из буфера в блок
         raw_memcpy(block->data + block_offset,
                    buffer + total_bytes_written,
                    bytes_to_copy);
         
-        // Помечаем блок как "грязный"
         block->dirty = 1;
         block->last_access = raw_time();
         
-        // Перемещаем блок в начало списка LRU
         if (block != cache_manager.head) {
-            // Вынимаем из текущей позиции
             if (block->prev) block->prev->next = block->next;
             if (block->next) block->next->prev = block->prev;
             
@@ -549,7 +1228,6 @@ ssize_t vtpc_write(int fd, const void *buf, size_t count) {
                 cache_manager.tail = block->prev;
             }
             
-            // Вставляем в начало
             block->prev = NULL;
             block->next = cache_manager.head;
             
@@ -566,7 +1244,6 @@ ssize_t vtpc_write(int fd, const void *buf, size_t count) {
         
         total_bytes_written += bytes_to_copy;
         
-        // Обновляем размер файла, если нужно
         off_t new_end_pos = current_pos + (off_t)bytes_to_copy;
         if (new_end_pos > info->file_size) {
             info->file_size = new_end_pos;
@@ -577,6 +1254,16 @@ ssize_t vtpc_write(int fd, const void *buf, size_t count) {
     return total_bytes_written;
 }
 
+/**
+ * @brief Позиционирование в файле
+ *
+ * Устанавливает позицию в файле согласно указанному смещению и режиму.
+ *
+ * @param fd Виртуальный дескриптор файла
+ * @param offset Смещение относительно точки отсчета
+ * @param whence Точка отсчета (SEEK_SET, SEEK_CUR, SEEK_END)
+ * @return Новая позиция в файле или -1 в случае ошибки
+ */
 off_t vtpc_lseek(int fd, off_t offset, int whence) {
     if (fd < 0 || fd >= 1024 || !open_files[fd]) return -1;
     
@@ -600,7 +1287,6 @@ off_t vtpc_lseek(int fd, off_t offset, int whence) {
             return -1;
     }
     
-    // Проверяем, что позиция не отрицательна
     if (new_position < 0) {
         return -1;
     }
@@ -609,31 +1295,129 @@ off_t vtpc_lseek(int fd, off_t offset, int whence) {
     return new_position;
 }
 
+/**
+ * @brief Синхронизация данных файла с диском
+ *
+ * Принудительно записывает все буферизованные данные файла на диск.
+ *
+ * @param fd Виртуальный дескриптор файла
+ * @return 0 в случае успеха, -1 в случае ошибки
+ */
 int vtpc_fsync(int fd) {
-    if (fd < 0 || fd >= 1024 || !open_files[fd]) return -1;
+    // 1. ПРОВЕРКА ВАЛИДНОСТИ ДЕСКРИПТОРА
+    if (fd < 0 || fd >= 1024 || !open_files[fd]) 
+        return -1;
     
-    spin_lock(&cache_manager.lock);
-    
-    // Записываем все "грязные" блоки этого файла на диск
-    CacheBlock *current = cache_manager.head;
-    while (current != NULL) {
-        if (current->fd == fd && current->dirty) {
-            write_block_to_disk(current);
-        }
-        current = current->next;
-    }
-    
-    spin_unlock(&cache_manager.lock);
-    
-    // Вызываем системный fsync для гарантированной записи на диск
     FileInfo *info = open_files[fd];
+    
+    // 2. ПРИ O_DIRECT КЭШ VTPC НЕ ИСПОЛЬЗУЕТСЯ
+    // Нет "грязных" блоков для сброса
+    
+    // 3. СИНХРОНИЗАЦИЯ ФАЙЛА НА ДИСКОВОМ УРОВНЕ
+    // raw_fsync() гарантирует, что ВСЕ данные файла записаны на диск
     int result = raw_fsync(info->fd);
+    
     
     return result;
 }
+// ========== ФУНКЦИИ ДЛЯ РАБОТЫ С ПРЯМЫМ ДОСТУПОМ ==========
 
-// ========== ФУНКЦИЯ ОЧИСТКИ ==========
+/**
+ * @brief Создание выровненного буфера для прямого доступа
+ *
+ * Создает буфер памяти, выровненный для прямого доступа к диску.
+ *
+ * @param size Размер буфера
+ * @return Указатель на выровненный буфер или NULL в случае ошибки
+ */
+void* vtpc_alloc_aligned_buffer(size_t size) {
+    DirectIOBuffer buffer = create_direct_io_buffer(size);
+    return buffer.buffer;
+}
 
+/**
+ * @brief Освобождение выровненного буфера
+ *
+ * Освобождает память, выделенную для выровненного буфера.
+ *
+ * @param buffer Указатель на выровненный буфер
+ */
+void vtpc_free_aligned_buffer(void *buffer) {
+    if (buffer) {
+        DirectIOBuffer db = {buffer, NULL, 0};
+        free_direct_io_buffer(&db);
+    }
+}
+
+/**
+ * @brief Принудительное чтение с диска в обход кэша
+ *
+ * Выполняет чтение данных из файла напрямую с диска, обходя кэш, даже если файл открыт без O_DIRECT.
+ *
+ * @param fd Виртуальный дескриптор файла
+ * @param aligned_buf Выровненный буфер для чтения данных
+ * @param count Количество байт для чтения
+ * @return Количество прочитанных байт или -1 в случае ошибки
+ */
+ssize_t vtpc_read_direct(int fd, void *aligned_buf, size_t count) {
+    if (fd < 0 || fd >= 1024 || !open_files[fd] || !aligned_buf) return -1;
+    if (!is_aligned(aligned_buf, DIRECT_ALIGNMENT)) return -1;
+    
+    FileInfo *info = open_files[fd];
+    if (info->position >= info->file_size) return 0;
+    
+    size_t to_read = count;
+    if (info->position + (off_t)to_read > info->file_size) {
+        to_read = info->file_size - info->position;
+    }
+    
+    // Всегда читаем напрямую с диска, игнорируя кэш
+    ssize_t bytes_read = direct_disk_read(info->fd, aligned_buf, to_read, info->position);
+    
+    if (bytes_read > 0) {
+        info->position += bytes_read;
+    }
+    
+    return bytes_read;
+}
+
+/**
+ * @brief Принудительная запись на диск в обход кэша
+ *
+ * Выполняет запись данных в файл напрямую на диск, обходя кэш, даже если файл открыт без O_DIRECT.
+ *
+ * @param fd Виртуальный дескриптор файла
+ * @param aligned_buf Выровненный буфер с данными для записи
+ * @param count Количество байт для записи
+ * @return Количество записанных байт или -1 в случае ошибки
+ */
+ssize_t vtpc_write_direct(int fd, const void *aligned_buf, size_t count) {
+    if (fd < 0 || fd >= 1024 || !open_files[fd] || !aligned_buf) return -1;
+    if (!is_aligned((void*)aligned_buf, DIRECT_ALIGNMENT)) return -1;
+    
+    FileInfo *info = open_files[fd];
+    
+    // Всегда пишем напрямую на диск, игнорируя кэш
+    ssize_t bytes_written = direct_disk_write(info->fd, aligned_buf, count, info->position);
+    
+    if (bytes_written > 0) {
+        info->position += bytes_written;
+        
+        // Обновляем размер файла
+        off_t new_end_pos = info->position;
+        if (new_end_pos > info->file_size) {
+            info->file_size = new_end_pos;
+        }
+    }
+    
+    return bytes_written;
+}
+
+/**
+ * @brief Очистка ресурсов
+ *
+ * Записывает все "грязные" блоки на диск и освобождает все ресурсы, связанные с файловой системой.
+ */
 void vtpc_cleanup(void) {
     spin_lock(&cache_manager.lock);
     
@@ -641,8 +1425,26 @@ void vtpc_cleanup(void) {
     CacheBlock *current = cache_manager.head;
     while (current != NULL) {
         if (current->dirty) {
-            write_block_to_disk(current);
+            FileInfo *file_info = open_files[current->fd];
+            if (file_info) {
+                if (file_info->use_direct_io) {
+                    write_block_to_disk_direct(current);
+                } else {
+                    off_t pos = current->block_number * BLOCK_SIZE;
+                    off_t old_pos = raw_lseek(file_info->fd, 0, SEEK_CUR);
+                    if (old_pos >= 0 && raw_lseek(file_info->fd, pos, SEEK_SET) >= 0) {
+                        raw_write(file_info->fd, current->data, BLOCK_SIZE);
+                        raw_lseek(file_info->fd, old_pos, SEEK_SET);
+                    }
+                }
+            }
         }
+        
+        // Освобождаем выровненную память данных
+        if (current->original_ptr) {
+            raw_munmap(current->original_ptr, BLOCK_SIZE + DIRECT_ALIGNMENT - 1);
+        }
+        
         CacheBlock *next = current->next;
         raw_munmap(current, sizeof(CacheBlock));
         current = next;
@@ -668,10 +1470,24 @@ void vtpc_cleanup(void) {
 // ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ОТЛАДКИ ==========
 
 #ifdef DEBUG
+/**
+ * @brief Получение размера кэша
+ *
+ * Возвращает текущее количество блоков в кэше.
+ *
+ * @return Количество блоков в кэше
+ */
 size_t vtpc_get_cache_size(void) {
     return cache_manager.block_count;
 }
 
+/**
+ * @brief Получение количества "грязных" блоков
+ *
+ * Возвращает текущее количество "грязных" блоков в кэше.
+ *
+ * @return Количество "грязных" блоков
+ */
 size_t vtpc_get_dirty_count(void) {
     spin_lock(&cache_manager.lock);
     
@@ -688,6 +1504,11 @@ size_t vtpc_get_dirty_count(void) {
     return dirty_count;
 }
 
+/**
+ * @brief Печать статистики кэша
+ *
+ * Печатает статистику кэша (количество блоков, количество "грязных" блоков).
+ */
 void vtpc_print_cache_stats(void) {
     spin_lock(&cache_manager.lock);
     
