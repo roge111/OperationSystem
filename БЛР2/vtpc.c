@@ -225,15 +225,15 @@ static inline int raw_fsync(int fd) {
  * @param size Размер выделяемой памяти
  * @return Указатель на выделенную память или NULL в случае ошибки
  */
-static inline void* raw_mmap(size_t size) {
-    // Для прямого доступа выравниваем память по границе 512 байт
-    void* result = (void*)syscall(SYS_mmap,
-                         NULL, size + DIRECT_ALIGNMENT - 1,
-                         PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS,
-                         -1, 0);
-    return result;
-}
+// static inline void* raw_mmap(size_t size) {
+//     // Для прямого доступа выравниваем память по границе 512 байт
+//     void* result = (void*)syscall(SYS_mmap,
+//                          NULL, size + DIRECT_ALIGNMENT - 1,
+//                          PROT_READ | PROT_WRITE,
+//                          MAP_PRIVATE | MAP_ANONYMOUS,
+//                          -1, 0);
+//     return result;
+// }
 
 /**
  * @brief Выделение выровненной памяти через системный вызов mmap
@@ -756,7 +756,7 @@ static CacheBlock* allocate_new_block(int fd, off_t block_number) {
     }
     
     // Выделяем память для структуры блока
-    CacheBlock *new_block = raw_mmap(sizeof(CacheBlock));
+    CacheBlock *new_block = raw_mmap_aligned(sizeof(CacheBlock));
     if (!new_block) {
         spin_unlock(&cache_manager.lock);
         return NULL;
@@ -784,7 +784,7 @@ static CacheBlock* allocate_new_block(int fd, off_t block_number) {
         read_block_from_disk_direct(new_block);
     } else {
         // Для обычных файлов используем стандартную память
-        new_block->data = raw_mmap(BLOCK_SIZE);
+        new_block->data = raw_mmap_aligned(BLOCK_SIZE);
         if (!new_block->data) {
             raw_munmap(new_block, sizeof(CacheBlock));
             spin_unlock(&cache_manager.lock);
@@ -905,7 +905,7 @@ int vtpc_open(const char *path, int flags) {
     }
     
     // Выделяем память
-    FileInfo *info = raw_mmap(sizeof(FileInfo));
+    FileInfo *info = raw_mmap_aligned(sizeof(FileInfo));
     if (!info) {
         raw_close(sys_fd);
         return -1;
