@@ -37,6 +37,7 @@
 #define O_DIRECT 00040000 /* прямой доступ к диску */
 #endif
 
+// Опредеояем макросы для mmap
 #ifndef PROT_READ
 #define PROT_READ   0x1
 #endif
@@ -57,6 +58,7 @@
 #define MAP_POPULATE 0x8000
 #endif
 
+// Определяем макросы для lseek
 #ifndef SEEK_SET
 #define SEEK_SET 0
 #endif
