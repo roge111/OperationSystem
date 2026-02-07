@@ -13,7 +13,7 @@
 
 При выполнении работы необходимо реализовать простой API для работы с файлами, предоставляющий пользователю следующие возможности (по аналогии с системным API):
 
-- Открытие файла по заданному пути файла, доступного для чтения. Процедура возвращает некоторый хэндл на файл. Пример: int vtpc_open(const char *path).
+- Открытие файла по заданному пути файла, доступного для чтения. Процедура возвращает некоторый хэндл на файл. Пример: int vtpc_open(const char *path, int flags, int mode).
 
 - Закрытие файла по хэндлу. Пример: int vtpc_close(int fd).
 
@@ -667,7 +667,7 @@ return new_block;
 API функции
 ---
 
-`int vtpc_open(const char *path)` - открывает файл и возвращает дескриптор:
+`int vtpc_open(const char *path, int flags, int mode)` - открывает файл и возвращает дескриптор:
 
 Эта функция открывает файл и возвращает виртуальный дескриптор файла для использования с другими функциями API.
 
@@ -683,39 +683,78 @@ if (!initialized) {
 }
 ```
 
-2. Пытаемся открыть файл с правами чтения/записи, если не удалось - только для чтения:
+2. Преобразуем флаги VTPC в системные флаги и проверяем наличие O_DIRECT:
 ```
-int sys_fd = raw_open(path, 2);  // O_RDWR
-if (sys_fd < 0) {
-    sys_fd = raw_open(path, 0); // O_RDONLY
-    if (sys_fd < 0) return -1;
+int sys_flags = 0;
+int use_direct_io = 0;
+
+// Копируем флаги как есть
+sys_flags = flags;
+
+// Проверяем, передал ли  O_DIRECT
+if (flags & 00040000) { // O_DIRECT
+    use_direct_io = 1;
+} else {
+    // Если  НЕ передает O_DIRECT, НЕ добавляем его
+    use_direct_io = 0;
+    sys_flags &= ~O_DIRECT; // Убеждаемся, что O_DIRECT не установлен
 }
 ```
 
-3. Получаем размер файла:
+3. Открываем файл с преобразованными флагами:
+```
+int actual_mode = mode;
+if (actual_mode == 0)
+{
+    actual_mode = 0666;
+}
+
+// Открываем файл
+int sys_fd = raw_open(path, sys_flags, actual_mode);
+
+// Если открываем с O_DIRECT и не получилось, пробуем без него
+if (sys_fd < 0 && (sys_flags & O_DIRECT))
+{
+    sys_flags &= ~O_DIRECT;
+    sys_fd = raw_open(path, sys_flags, actual_mode);
+    if (sys_fd < 0)
+        return -1;
+    use_direct_io = 0;
+}
+else if (sys_fd < 0)
+{
+    return -1;
+}
+```
+
+4. Получаем размер файла:
 ```
 off_t size = raw_lseek(sys_fd, 0, SEEK_END);
-if (size < 0 || raw_lseek(sys_fd, 0, SEEK_SET) < 0) {
+if (size < 0 || raw_lseek(sys_fd, 0, SEEK_SET) < 0)
+{
     raw_close(sys_fd);
     return -1;
 }
 ```
 
-4. Ищем свободный слот для FileInfo:
+5. Ищем свободный слот для FileInfo:
 ```
 int vtpc_fd = -1;
-for (int i = 0; i < 1024; i++) {
-    if (!open_files[i]) {
+for (int i = 0; i < 1024; i++)
+{
+    if (!open_files[i])
+    {
         vtpc_fd = i;
         break;
     }
 }
 ```
 
-5. Выделяем память для FileInfo и инициализируем его:
+6. Выделяем память для FileInfo и инициализируем его:
 ```
-FileInfo *info = raw_mmap(sizeof(FileInfo));
-if (!info) {
+FileInfo *info = raw_mmap_aligned(sizeof(FileInfo));
+if (!info)
+{
     raw_close(sys_fd);
     return -1;
 }
@@ -723,6 +762,7 @@ if (!info) {
 info->fd = sys_fd;
 info->file_size = size;
 info->position = 0;
+info->use_direct_io = use_direct_io; // Сохраняем режим
 
 open_files[vtpc_fd] = info;
 return vtpc_fd;
@@ -1003,7 +1043,7 @@ return result;
 ## Функции для работы с прямым доступом к диску
 
 ### vtpc_open с флагами
-Функция `int vtpc_open(const char *path, int flags)` открывает файл с дополнительными флагами:
+Функция `int vtpc_open(const char *path, int flags, int mode)` открывает файл с дополнительными флагами:
 - `VTPC_O_RDONLY` - открытие только для чтения
 - `VTPC_O_WRONLY` - открытие только для записи
 - `VTPC_O_RDWR` - открытие для чтения и записи
