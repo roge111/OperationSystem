@@ -1,4 +1,4 @@
-// MemoryLoader_vtpc.c
+// MemoryLoader_vtpc.c - ИСПРАВЛЕННАЯ ВЕРСИЯ
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,7 +14,7 @@
 
 #define ARRAY_SIZE 10000
 #define MAX_NUM_LENGTH 150
-#define BLOCK_SIZE 4096  // 1 МБ
+#define BLOCK_SIZE 4096  // 4 KB
 
 // Добавляем заголовок нашего кэша
 #include "vtpc.h"
@@ -38,7 +38,7 @@ typedef struct {
     int found_number; // Найдено ли число
 } ReadData;
 
-// Прототипы функций мониторинга (ранее были в CpuLoader.c)
+// Прототипы функций мониторинга
 void* process_monitor_thread(void* arg);
 void* cpu_monitoring(void* arg);
 
@@ -167,153 +167,133 @@ void* process_monitor_thread(void* arg) {
     return NULL;
 }
 
-// Функция случайного чтения с использованием VTPC кэша
-// Функция случайного чтения с использованием VTPC кэша + временные файлы
-ReadData randomReadTest_vtpc(int number) {
-    ReadData result = { .time_total = 0, .found_number = 0 };
+// Функция для создания выровненного буфера
+void* allocate_aligned_buffer(size_t size, size_t alignment) {
+    void* ptr = NULL;
+    if (posix_memalign(&ptr, alignment, size) != 0) {
+        return NULL;
+    }
+    return ptr;
+}
 
+// Функция случайного чтения с использованием VTPC
+ReadData randomReadTest_vtpc(int number) {
+    ReadData result = {0};
+    
     char number_str[MAX_NUM_LENGTH];
     snprintf(number_str, sizeof(number_str), "%d", number);
     
-    // Открываем файл через наш кэш
-    int fd = vtpc_open("fragments_numbers_2.txt", VTPC_O_RDONLY | VTPC_O_DIRECT);
+    // 1. ОТКРЫТИЕ ФАЙЛА
+    // Важно: vtpc_open ожидает СИСТЕМНЫЕ флаги, а не VTPC_* флаги!
+    int fd = vtpc_open("fragments_numbers_2.txt", O_RDONLY, 0);
     if (fd < 0) {
-        printf("Error: failed to open file with vtpc_open\n");
+        // Если не получилось, пробуем создать файл
+        printf("Failed to open file, trying to create...\n");
         return result;
     }
     
-    // Получаем размер файла
+    // 2. ПОЛУЧЕНИЕ РАЗМЕРА
     off_t file_size = vtpc_lseek(fd, 0, SEEK_END);
-    if (file_size <= 0) {
-        printf("Error: failed to get file size\n");
+    if (file_size <= BLOCK_SIZE) {
         vtpc_close(fd);
+        printf("File too small: %ld bytes\n", file_size);
         return result;
     }
-    
-    // Возвращаемся в начало
     vtpc_lseek(fd, 0, SEEK_SET);
     
-    // Выделяем буфер
+    // 3. ВЫДЕЛЕНИЕ БУФЕРА
     char* buffer = malloc(BLOCK_SIZE);
     if (!buffer) {
-        printf("Error: failed to allocate memory\n");
         vtpc_close(fd);
         return result;
     }
     
-    // Проверяем размер файла
-    if (file_size <= BLOCK_SIZE) {
-        printf("Error: file size is too small\n");
-        free(buffer);
-        vtpc_close(fd);
-        return result;
-    }
-
-    // Генерация случайного смещения
+    // 4. СЛУЧАЙНАЯ ПОЗИЦИЯ
     srand((unsigned int)time(NULL) + getpid());
     off_t max_offset = file_size - BLOCK_SIZE;
-    off_t offset = (off_t)(rand() % (int)(max_offset / 4096)) * 4096; // Выравнивание по 4KB
-    
-    // Перемещаемся на случайную позицию
-    vtpc_lseek(fd, offset, SEEK_SET);
-
-    // Замер времени чтения через наш кэш
-    clock_t start_read = clock();
-    
-    // Чтение блока данных через наш кэш
-    ssize_t bytesRead = vtpc_read(fd, buffer, BLOCK_SIZE);
-    
-    clock_t end_read = clock();
-    
-    // Проверка успешности чтения
-    if (bytesRead != BLOCK_SIZE) {
-        printf("Warning: read %zd bytes, expected %d\n", bytesRead, BLOCK_SIZE);
-    }
-    
-    // Поиск числа в блоке
-    size_t num_len = strlen(number_str);
-    if (num_len == 0 || num_len > 150) {
+    if (max_offset <= 0) {
         free(buffer);
         vtpc_close(fd);
         return result;
     }
     
-    clock_t start_replace = 0;
-    clock_t end_replace = 0;
-    int replaced = 0;
+    off_t offset = (off_t)(rand() % (int)(max_offset / 4096)) * 4096;
+    vtpc_lseek(fd, offset, SEEK_SET);
     
-    // Простой поиск числа (упрощенный вариант)
+    // 5. ЧТЕНИЕ
+    clock_t start_read = clock();
+    ssize_t bytesRead = vtpc_read(fd, buffer, BLOCK_SIZE);
+    clock_t end_read = clock();
+    
+    if (bytesRead != BLOCK_SIZE) {
+        printf("Read only %zd bytes instead of %d\n", bytesRead, BLOCK_SIZE);
+        free(buffer);
+        vtpc_close(fd);
+        return result;
+    }
+    
+    // 6. ПОИСК ЧИСЛА
+    size_t num_len = strlen(number_str);
+    
     for (size_t i = 0; i < BLOCK_SIZE - num_len; i++) {
         if (memcmp(buffer + i, number_str, num_len) == 0) {
-            // Проверка границ
             int left_ok = (i == 0) || !isalnum(buffer[i - 1]);
             int right_ok = (i + num_len >= BLOCK_SIZE) || !isalnum(buffer[i + num_len]);
             
             if (left_ok && right_ok) {
-                start_replace = clock();
+                // Нашли число - заменяем
                 memcpy(buffer + i, number_str, num_len);
-                end_replace = clock();
                 result.found_number = 1;
-                replaced = 1;
                 break;
             }
         }
     }
     
-    // Записываем измененный блок через наш кэш, если число было найдено
-    clock_t start_write = 0;
-    clock_t end_write = 0;
-    
-    if (result.found_number == 1) {
-        start_write = clock();
+    // 7. ЕСЛИ НАШЛИ - ЗАПИСЫВАЕМ ОБРАТНО
+    if (result.found_number) {
         vtpc_lseek(fd, offset, SEEK_SET);
         ssize_t written = vtpc_write(fd, buffer, BLOCK_SIZE);
-        vtpc_fsync(fd);  // Принудительная синхронизация
-        end_write = clock();
+        vtpc_fsync(fd);
         
         if (written != BLOCK_SIZE) {
-            printf("Warning: wrote %zd bytes, expected %d\n", written, BLOCK_SIZE);
+            printf("Write only %zd bytes instead of %d\n", written, BLOCK_SIZE);
         }
     }
     
-    // ВАЖНО: ДОБАВЛЯЕМ ИНТЕНСИВНУЮ ЗАПИСЬ ВО ВРЕМЕННЫЕ ФАЙЛЫ
-    clock_t start_io_write = clock();
+    // 8. НАГРУЗКА ПАМЯТИ - СОЗДАЕМ ВРЕМЕННЫЕ ФАЙЛЫ
+    clock_t start_io = clock();
     
-    // Создаем 10 временных файлов и пишем в них через VTPC
     for (int j = 0; j < 10; j++) {
-        char write_filename[256];
-        sprintf(write_filename, "temp_io_load_vtpc_%d_%d.tmp", getpid(), rand());
+        char filename[256];
+        snprintf(filename, sizeof(filename), "temp_vtpc_%d_%d.tmp", getpid(), rand());
         
-        // Открываем временный файл через VTPC
-        int temp_fd = vtpc_open(write_filename, VTPC_O_RDWR | VTPC_O_CREAT);
+        // Открываем временный файл
+        int temp_fd = vtpc_open(filename, O_RDWR | O_CREAT | O_TRUNC, 0644);
         if (temp_fd >= 0) {
-            // Пишем несколько раз в тот же файл
+            // Пишем несколько раз
             for (int k = 0; k < 5; k++) {
                 vtpc_lseek(temp_fd, 0, SEEK_SET);
                 vtpc_write(temp_fd, buffer, BLOCK_SIZE);
-                vtpc_fsync(temp_fd);  // Принудительная синхронизация через VTPC
+                vtpc_fsync(temp_fd);
             }
             vtpc_close(temp_fd);
-            
-            // Удаляем временный файл (обычным unlink, т.к. VTPC файл уже закрыт)
-            unlink(write_filename);
+            unlink(filename); // Удаляем сразу
         }
     }
     
-    clock_t end_io_write = clock();
+    clock_t end_io = clock();
     
-    // Закрываем основной файл
+    // 9. ОСВОБОЖДЕНИЕ РЕСУРСОВ
+    free(buffer);
     vtpc_close(fd);
     
-    // Вычисляем общее время
-    result.time_total = (end_io_write - start_io_write); // Используем время интенсивной записи
-    
-    free(buffer);
+    // 10. РАСЧЕТ ВРЕМЕНИ
+    result.time_total = (end_io - start_io);
     
     return result;
 }
 
-// И аналогично нужно обновить randomReadTest_system:
+// Функция случайного чтения с системными вызовами (для сравнения)
 ReadData randomReadTest_system(int number) {
     ReadData result = { .time_total = 0, .found_number = 0 };
 
@@ -463,10 +443,7 @@ ReadData randomReadTest_system(int number) {
     return result;
 }
 
-// Старая версия для сравнения (без кэша)
-
-
-// Основная функция нагрузки на память с использованием VTPC кэша
+// Основная функция нагрузки на память с использованием VTPC
 clock_t memory_loader_vtpc(int number, double* user_avg, double* system_avg, double* wait_avg,
                           unsigned long* context_switches_total, unsigned long* context_switches_delta, 
                           int* parallel_processes)
@@ -490,6 +467,7 @@ clock_t memory_loader_vtpc(int number, double* user_avg, double* system_avg, dou
     pthread_t process_monitor_thread_id;
     
     clock_t total_time_read = 0;
+    int found_count = 0;
     
     if (pthread_create(&monitoring_thread_read, NULL, cpu_monitoring, NULL) == 0) {
         pthread_create(&process_monitor_thread_id, NULL, process_monitor_thread, &process_monitor);
@@ -499,11 +477,10 @@ clock_t memory_loader_vtpc(int number, double* user_avg, double* system_avg, dou
             ReadData result = randomReadTest_vtpc(number);
             total_time_read += result.time_total;
             
-            // Можно раскомментировать для отладки
-            // if (result.found_number == 1) {
-            //     printf("Found number at iteration %d\n", i);
-            //     break;
-            // }
+            if (result.found_number) {
+                found_count++;
+                if (found_count >= 3) break; // Нашли достаточно раз
+            }
         }
 
         process_monitor.monitoring = 0;
@@ -516,6 +493,11 @@ clock_t memory_loader_vtpc(int number, double* user_avg, double* system_avg, dou
         for (int i = 0; i < 100; i++) {
             ReadData result = randomReadTest_vtpc(number);
             total_time_read += result.time_total;
+            
+            if (result.found_number) {
+                found_count++;
+                if (found_count >= 3) break;
+            }
         }
     }
 
@@ -533,10 +515,11 @@ clock_t memory_loader_vtpc(int number, double* user_avg, double* system_avg, dou
         *context_switches_delta = 0;
     }
 
+    printf("VTPC: Found number %d times\n", found_count);
     return total_time_read;
 }
 
-// Основная функция нагрузки на память с системными вызовами (для сравнения)
+// Основная функция нагрузки на память с системными вызовами
 clock_t memory_loader_system(int number, double* user_avg, double* system_avg, double* wait_avg,
                             unsigned long* context_switches_total, unsigned long* context_switches_delta, 
                             int* parallel_processes)
@@ -558,6 +541,7 @@ clock_t memory_loader_system(int number, double* user_avg, double* system_avg, d
     pthread_t process_monitor_thread_id;
     
     clock_t total_time_read = 0;
+    int found_count = 0;
     
     if (pthread_create(&monitoring_thread_read, NULL, cpu_monitoring, NULL) == 0) {
         pthread_create(&process_monitor_thread_id, NULL, process_monitor_thread, &process_monitor);
@@ -565,6 +549,11 @@ clock_t memory_loader_system(int number, double* user_avg, double* system_avg, d
         for (int i = 0; i < 100; i++) {
             ReadData result = randomReadTest_system(number);
             total_time_read += result.time_total;
+            
+            if (result.found_number) {
+                found_count++;
+                if (found_count >= 3) break;
+            }
         }
 
         process_monitor.monitoring = 0;
@@ -576,6 +565,11 @@ clock_t memory_loader_system(int number, double* user_avg, double* system_avg, d
         for (int i = 0; i < 100; i++) {
             ReadData result = randomReadTest_system(number);
             total_time_read += result.time_total;
+            
+            if (result.found_number) {
+                found_count++;
+                if (found_count >= 3) break;
+            }
         }
     }
 
@@ -592,26 +586,26 @@ clock_t memory_loader_system(int number, double* user_avg, double* system_avg, d
         *context_switches_delta = 0;
     }
 
+    printf("System: Found number %d times\n", found_count);
     return total_time_read;
-}
-
-// Вспомогательная функция для предотвращения оптимизации
-void use_data(char* str) {
-    volatile char dummy;
-    while (*str) {
-        dummy = *str;
-        (void)dummy;   
-        str++;
-    }
 }
 
 // Тестовая функция для сравнения производительности
 void compare_performance() {
-    printf("=== Сравнение производительности VTPC кэша и системных вызовов ===\n\n");
+    printf("=== Сравнение производительности VTPC и системных вызовов ===\n\n");
+    
+    // Проверяем наличие тестового файла
+    FILE* test_file = fopen("fragments_numbers_2.txt", "r");
+    if (!test_file) {
+        printf("Ошибка: файл fragments_numbers_2.txt не найден!\n");
+        printf("Создайте тестовый файл с помощью скрипта generate_fragments.py\n");
+        return;
+    }
+    fclose(test_file);
     
     int test_number = 12345;  // Число для поиска
     
-    printf("Запуск теста с VTPC кэшем...\n");
+    printf("Запуск теста с VTPC...\n");
     double vtpc_user, vtpc_system, vtpc_wait;
     unsigned long vtpc_ctx_total, vtpc_ctx_delta;
     int vtpc_processes;
@@ -619,7 +613,7 @@ void compare_performance() {
     clock_t vtpc_time = memory_loader_vtpc(test_number, &vtpc_user, &vtpc_system, &vtpc_wait,
                                           &vtpc_ctx_total, &vtpc_ctx_delta, &vtpc_processes);
     
-    printf("\nЗапуск теста с системными вызовами (O_DIRECT)...\n");
+    printf("\nЗапуск теста с системными вызовами...\n");
     double sys_user, sys_system, sys_wait;
     unsigned long sys_ctx_total, sys_ctx_delta;
     int sys_processes;
@@ -628,52 +622,41 @@ void compare_performance() {
                                            &sys_ctx_total, &sys_ctx_delta, &sys_processes);
     
     printf("\n=== РЕЗУЛЬТАТЫ СРАВНЕНИЯ ===\n");
-    printf("VTPC Cache:\n");
+    printf("VTPC:\n");
     printf("  Время выполнения: %ld тактов (%.3f сек)\n", vtpc_time, (double)vtpc_time / CLOCKS_PER_SEC);
     printf("  Загрузка CPU: user=%.1f%%, system=%.1f%%, wait=%.1f%%\n", vtpc_user, vtpc_system, vtpc_wait);
     printf("  Переключения контекста: %lu\n", vtpc_ctx_delta);
     printf("  Процессов: %d\n", vtpc_processes);
     
-    printf("\nSystem Calls (O_DIRECT):\n");
+    printf("\nSystem Calls:\n");
     printf("  Время выполнения: %ld тактов (%.3f сек)\n", sys_time, (double)sys_time / CLOCKS_PER_SEC);
     printf("  Загрузка CPU: user=%.1f%%, system=%.1f%%, wait=%.1f%%\n", sys_user, sys_system, sys_wait);
     printf("  Переключения контекста: %lu\n", sys_ctx_delta);
     printf("  Процессов: %d\n", sys_processes);
     
     printf("\n=== СРАВНЕНИЕ ===\n");
-    if (sys_time > 0) {
+    if (sys_time > 0 && vtpc_time > 0) {
         double speedup = (double)sys_time / vtpc_time;
         printf("Ускорение VTPC vs System: %.2fx\n", speedup);
         
         if (speedup > 1.0) {
-            printf("✅ VTPC кэш работает БЫСТРЕЕ системных вызовов\n");
+            printf("✅ VTPC работает БЫСТРЕЕ системных вызовов\n");
         } else if (speedup < 1.0) {
-            printf("⚠️ VTPC кэш работает МЕДЛЕННЕЕ системных вызовов\n");
+            printf("⚠️ VTPC работает МЕДЛЕННЕЕ системных вызовов\n");
         } else {
             printf("⚖️ Производительность одинаковая\n");
         }
     }
 }
 
-// Простая тестовая программа
 int main() {
     printf("=== Memory Loader с VTPC Cache ===\n");
-    
-    // Проверяем наличие тестового файла
-    FILE* test_file = fopen("fragments_numbers.bin", "r");
-    if (!test_file) {
-        printf("Ошибка: файл fragments_numbers_2.txt не найден!\n");
-        printf("Создайте тестовый файл командой:\n");
-        printf("  python3 generate_fragments.py\n");
-        return 1;
-    }
-    fclose(test_file);
     
     // Запускаем сравнение производительности
     compare_performance();
     
-    // Очищаем ресурсы VTPC кэша
-    // (добавьте функцию vtpc_cleanup() в ваш vtpc.c если еще нет)
+    // Очищаем ресурсы VTPC
+    vtpc_cleanup();
     
     return 0;
 }
